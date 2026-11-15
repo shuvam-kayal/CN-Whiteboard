@@ -5,6 +5,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -27,6 +28,8 @@ class WhiteboardPage(QWidget):
     chat_message_requested = Signal(str)
     save_board_requested = Signal()
     load_board_requested = Signal()
+    undo_requested = Signal()
+    redo_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -102,8 +105,19 @@ class WhiteboardPage(QWidget):
         self.tool_group.addButton(self.eraser_button)
         self.pen_button.clicked.connect(lambda: self.canvas.set_tool("pen"))
         self.eraser_button.clicked.connect(lambda: self.canvas.set_tool("eraser"))
+        self.pen_button.clicked.connect(lambda: self.shape_combo.setCurrentIndex(0))
+        self.eraser_button.clicked.connect(lambda: self.shape_combo.setCurrentIndex(0))
         row.addWidget(self.pen_button)
         row.addWidget(self.eraser_button)
+
+        self.shape_combo = QComboBox()
+        self.shape_combo.setObjectName("shapeToolCombo")
+        self.shape_combo.addItem("Shape…", None)
+        self.shape_combo.addItem("Line", "line")
+        self.shape_combo.addItem("Rectangle", "rectangle")
+        self.shape_combo.addItem("Ellipse", "ellipse")
+        self.shape_combo.currentIndexChanged.connect(self._choose_shape)
+        row.addWidget(self.shape_combo)
 
         color_label = QLabel("Color")
         color_label.setObjectName("muted")
@@ -145,8 +159,44 @@ class WhiteboardPage(QWidget):
         self.load_board_button.clicked.connect(self.load_board_requested.emit)
         row.addWidget(self.save_board_button)
         row.addWidget(self.load_board_button)
+        self.undo_button = QPushButton("Undo")
+        self.undo_button.setObjectName("undoButton")
+        self.undo_button.clicked.connect(self.undo_requested.emit)
+        self.redo_button = QPushButton("Redo")
+        self.redo_button.setObjectName("redoButton")
+        self.redo_button.clicked.connect(self.redo_requested.emit)
+        row.addWidget(self.undo_button)
+        row.addWidget(self.redo_button)
+        self.export_button = QPushButton("Export PNG")
+        self.export_button.setObjectName("exportPngButton")
+        self.export_button.clicked.connect(self._export_png)
+        row.addWidget(self.export_button)
         row.addStretch()
         return frame
+
+    def _choose_shape(self, index: int) -> None:
+        shape = self.shape_combo.itemData(index)
+        if not shape:
+            return
+        self.tool_group.setExclusive(False)
+        self.pen_button.setChecked(False)
+        self.eraser_button.setChecked(False)
+        self.tool_group.setExclusive(True)
+        self.canvas.set_tool(shape)
+
+    def _export_png(self) -> None:
+        path, _selected_filter = QFileDialog.getSaveFileName(
+            self, "Export whiteboard as PNG", "whiteboard.png", "PNG image (*.png)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".png"):
+            path += ".png"
+        if self.canvas.export_png(path):
+            self.connection_label.setText(f"Exported · {path}")
+        else:
+            self.connection_label.setText("PNG export failed")
+            self.connection_label.setStyleSheet("color: #b53c4b;")
 
     def _choose_color(self, index: int) -> None:
         color = self.color_combo.itemData(index)
@@ -320,6 +370,9 @@ class WhiteboardPage(QWidget):
 
     def replace_board_state(self, operations: object) -> None:
         self.canvas.replace_board_state(operations)
+
+    def set_operation_active(self, sequence_number: int, active: bool) -> bool:
+        return self.canvas.set_operation_active(sequence_number, active)
 
     def set_persistence_status(self, message: str, *, is_error: bool = False) -> None:
         self.persistence_status = message

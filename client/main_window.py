@@ -40,6 +40,8 @@ class MainWindow(QMainWindow):
         self.whiteboard_page.chat_message_requested.connect(self._send_chat_message)
         self.whiteboard_page.save_board_requested.connect(self._save_board)
         self.whiteboard_page.load_board_requested.connect(self._load_board)
+        self.whiteboard_page.undo_requested.connect(self._undo_drawing)
+        self.whiteboard_page.redo_requested.connect(self._redo_drawing)
 
     def _create_room(self, username: str, address: str, port: int) -> None:
         self._connect_to_room(
@@ -140,6 +142,12 @@ class MainWindow(QMainWindow):
                     self.whiteboard_page.set_connection_status(
                         f"Rejected drawing update: {exc}"
                     )
+        elif message_type == "drawing_operation_status":
+            if payload.get("room_code") == self.room_code:
+                sequence = payload.get("sequence_number")
+                active = payload.get("active")
+                if isinstance(sequence, int) and not isinstance(sequence, bool) and isinstance(active, bool):
+                    self.whiteboard_page.set_operation_active(sequence, active)
         elif message_type == "cursor_update":
             if (
                 payload.get("room_code") == self.room_code
@@ -176,6 +184,7 @@ class MainWindow(QMainWindow):
             elif payload.get("code") in {
                 "host_only", "board_not_found", "invalid_board", "save_failed",
                 "board_too_large", "board_restore_failed", "not_in_room",
+                "nothing_to_undo", "nothing_to_redo", "invalid_drawing_history",
             } and self.pages.currentWidget() is self.whiteboard_page:
                 self.whiteboard_page.set_persistence_status(message_text, is_error=True)
             elif self.pages.currentWidget() is self.whiteboard_page:
@@ -219,6 +228,16 @@ class MainWindow(QMainWindow):
         client = self.network_client
         if client is None or not client.send_message("load_board", {}):
             self.whiteboard_page.set_persistence_status("Board load was not sent · disconnected", is_error=True)
+
+    def _undo_drawing(self) -> None:
+        client = self.network_client
+        if client is None or not client.send_message("undo_operation", {}):
+            self.whiteboard_page.set_connection_status("Undo was not sent · disconnected")
+
+    def _redo_drawing(self) -> None:
+        client = self.network_client
+        if client is None or not client.send_message("redo_operation", {}):
+            self.whiteboard_page.set_connection_status("Redo was not sent · disconnected")
 
     def closeEvent(self, event) -> None:
         self._close_network_client()

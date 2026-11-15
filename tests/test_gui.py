@@ -120,6 +120,28 @@ def test_toolbar_controls_set_pen_color_size_tool_and_clear(app) -> None:
     window.close()
 
 
+def test_undo_redo_buttons_emit_requests(app) -> None:
+    board = WhiteboardPage()
+    undo = QSignalSpy(board.undo_requested)
+    redo = QSignalSpy(board.redo_requested)
+    QTest.mouseClick(board.undo_button, Qt.MouseButton.LeftButton)
+    QTest.mouseClick(board.redo_button, Qt.MouseButton.LeftButton)
+    assert undo.count() == 1
+    assert redo.count() == 1
+    board.close()
+
+
+def test_shape_selector_changes_drawing_tool(app) -> None:
+    board = WhiteboardPage()
+    for index, shape in ((1, "line"), (2, "rectangle"), (3, "ellipse")):
+        board.shape_combo.setCurrentIndex(index)
+        assert board.canvas.tool == shape
+    QTest.mouseClick(board.pen_button, Qt.MouseButton.LeftButton)
+    assert board.canvas.tool == "pen"
+    assert board.shape_combo.currentIndex() == 0
+    board.close()
+
+
 def test_participant_notifications_and_cursor_update_throttling(app) -> None:
     board = WhiteboardPage()
     board.set_room("Alice", "ROOM42", True, "127.0.0.1", 5000, "alice-id")

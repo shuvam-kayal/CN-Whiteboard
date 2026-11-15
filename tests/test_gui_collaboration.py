@@ -120,6 +120,21 @@ def test_remote_strokes_render_on_other_room_members_in_gui(app, server) -> None
     assert len(bob.whiteboard_page.canvas.engine.operations) == operation_count
     assert all(remote_update_threads)
 
+    set_status = bob.whiteboard_page.set_operation_active
+
+    def record_status_gui_thread(sequence_number, active):
+        remote_update_threads.append(QThread.currentThread() == gui_thread)
+        return set_status(sequence_number, active)
+
+    bob.whiteboard_page.set_operation_active = record_status_gui_thread
+    QTest.mouseClick(alice.whiteboard_page.undo_button, Qt.MouseButton.LeftButton)
+    wait_until(app, lambda: not bob.whiteboard_page.canvas.engine.operations[0].active)
+    assert not alice.whiteboard_page.canvas.engine.operations[0].active
+    QTest.mouseClick(alice.whiteboard_page.redo_button, Qt.MouseButton.LeftButton)
+    wait_until(app, lambda: bob.whiteboard_page.canvas.engine.operations[0].active)
+    assert alice.whiteboard_page.canvas.engine.operations[0].active
+    assert all(remote_update_threads)
+
     alice.whiteboard_page.chat_input.setText("First message from Alice")
     QTest.mouseClick(
         alice.whiteboard_page.chat_send_button, Qt.MouseButton.LeftButton

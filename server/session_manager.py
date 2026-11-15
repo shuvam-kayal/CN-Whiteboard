@@ -1,6 +1,6 @@
 """Thread-safe room and participant state, independent of socket handling."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import colorsys
 from datetime import datetime, timezone
 import math
@@ -58,6 +58,9 @@ class Room:
     code: str
     participants: dict[str, Participant]
     drawing_operations: list[dict]
+    undo_stacks: dict[str, list[int]] = field(default_factory=dict)
+    redo_stacks: dict[str, list[int]] = field(default_factory=dict)
+    participant_names: dict[str, str] = field(default_factory=dict)
 
     def participant_list(self) -> list[dict[str, str | bool]]:
         return [participant.as_dict() for participant in self.participants.values()]
@@ -97,6 +100,12 @@ class BoardLoadChange:
     recipients: tuple[str, ...]
 
 
+@dataclass
+class DrawingStatusChange:
+    status: dict
+    recipients: tuple[str, ...]
+
+
 class SessionManager:
     """Manage independent rooms and map connected clients to memberships."""
 
@@ -119,7 +128,12 @@ class SessionManager:
             participant = Participant(
                 uuid.uuid4().hex, name, True, CURSOR_COLORS[0]
             )
-            room = Room(code, {client_id: participant}, [])
+            room = Room(
+                code,
+                {client_id: participant},
+                [],
+                participant_names={participant.participant_id: participant.username},
+            )
             self._rooms[code] = room
             self._client_rooms[client_id] = code
             return self._change(room, participant)
@@ -140,14 +154,33 @@ class SessionManager:
                     code = "room_not_found" if exc.code == "board_not_found" else "board_restore_failed"
                     message = "no room exists with that code" if code == "room_not_found" else str(exc)
                     raise SessionError(code, message) from exc
-                room = Room(normalized_code, {}, saved.operations)
+                room = Room(
+                    normalized_code, {}, saved.operations,
+                    saved.undo_stacks, saved.redo_stacks, saved.participant_names
+                )
                 self._rooms[normalized_code] = room
             requested_name = self._validate_username(username)
             name = self._unique_username(room, requested_name)
+            restored_id = next(
+                (
+                    participant_id
+                    for participant_id, previous_name in room.participant_names.items()
+                    if previous_name.casefold() == name.casefold()
+                    and all(
+                        member.participant_id != participant_id
+                        for member in room.participants.values()
+                    )
+                ),
+                None,
+            )
             participant = Participant(
-                uuid.uuid4().hex, name, not room.participants, self._next_cursor_color(room)
+                restored_id or uuid.uuid4().hex,
+                name,
+                not room.participants,
+                self._next_cursor_color(room),
             )
             room.participants[client_id] = participant
+            room.participant_names[participant.participant_id] = participant.username
             self._client_rooms[client_id] = room.code
             return self._change(room, participant)
 
@@ -156,7 +189,13 @@ class SessionManager:
         with self._lock:
             room = self._require_host_room(client_id)
             try:
-                saved = self.persistence.save_board(room.code, room.drawing_operations)
+                saved = self.persistence.save_board(
+                    room.code,
+                    room.drawing_operations,
+                    room.undo_stacks,
+                    room.redo_stacks,
+                    room.participant_names,
+                )
             except PersistenceError as exc:
                 raise SessionError(exc.code, str(exc)) from exc
             return {
@@ -174,6 +213,9 @@ class SessionManager:
             except PersistenceError as exc:
                 raise SessionError(exc.code, str(exc)) from exc
             room.drawing_operations = saved.operations
+            room.undo_stacks = saved.undo_stacks
+            room.redo_stacks = saved.redo_stacks
+            room.participant_names = saved.participant_names
             operations = [
                 {**operation, "points": [point[:] for point in operation["points"]]}
                 for operation in room.drawing_operations
@@ -213,13 +255,54 @@ class SessionManager:
             operation["sequence_number"] = len(room.drawing_operations) + 1
             operation["participant_id"] = room.participants[client_id].participant_id
             operation["room_code"] = room.code
+            operation["active"] = True
             room.drawing_operations.append(operation)
+            participant_id = room.participants[client_id].participant_id
+            room.undo_stacks.setdefault(participant_id, []).append(operation["sequence_number"])
+            room.redo_stacks[participant_id] = []
             recipients = tuple(
                 other_client_id
                 for other_client_id in room.participants
                 if other_client_id != client_id
             )
             return DrawingChange(dict(operation), recipients)
+
+    def change_drawing_status(self, client_id: str, action: str) -> DrawingStatusChange:
+        """Undo or redo the caller's latest eligible stroke and route its status."""
+        with self._lock:
+            room_code = self._client_rooms.get(client_id)
+            if room_code is None:
+                raise SessionError("not_in_room", "client must join a room before undo or redo")
+            if action not in {"undo", "redo"}:
+                raise SessionError("invalid_drawing_action", "drawing action must be undo or redo")
+            room = self._rooms[room_code]
+            participant_id = room.participants[client_id].participant_id
+            stacks = room.undo_stacks if action == "undo" else room.redo_stacks
+            stack = stacks.setdefault(participant_id, [])
+            if not stack:
+                code = "nothing_to_undo" if action == "undo" else "nothing_to_redo"
+                raise SessionError(code, f"there is no drawing operation to {action}")
+            sequence = stack.pop()
+            operation = next(
+                (item for item in room.drawing_operations if item["sequence_number"] == sequence),
+                None,
+            )
+            if operation is None or operation["participant_id"] != participant_id:
+                raise SessionError("invalid_drawing_history", "drawing history is inconsistent")
+            active = action == "redo"
+            if operation["active"] is active:
+                raise SessionError("invalid_drawing_history", "drawing operation status is inconsistent")
+            operation["active"] = active
+            next_stacks = room.redo_stacks if action == "undo" else room.undo_stacks
+            next_stacks.setdefault(participant_id, []).append(sequence)
+            status = {
+                "room_code": room.code,
+                "participant_id": participant_id,
+                "sequence_number": sequence,
+                "active": active,
+                "action": action,
+            }
+            return DrawingStatusChange(status, tuple(room.participants))
 
     def get_drawing_operations(self, room_code: str) -> list[dict]:
         """Return a copy of the in-memory room canvas history."""

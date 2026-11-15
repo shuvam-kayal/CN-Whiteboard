@@ -18,15 +18,16 @@ class DrawingDataError(ValueError):
 def validate_drawing_operation(
     payload: Any, *, allow_sequence_number: bool = False
 ) -> dict[str, Any]:
-    """Validate and copy one pen/eraser operation received over the wire."""
+    """Validate one stroke or two-point shape operation received over the wire."""
     required = {"operation_type", "points", "color", "brush_size"}
     allowed = required | ({"sequence_number"} if allow_sequence_number else set())
     if not isinstance(payload, dict) or set(payload) != allowed:
         raise DrawingDataError("drawing operation has missing or unexpected fields")
 
     operation_type = payload["operation_type"]
-    if not isinstance(operation_type, str) or operation_type not in {"pen", "eraser"}:
-        raise DrawingDataError("operation_type must be 'pen' or 'eraser'")
+    operation_types = {"pen", "eraser", "line", "rectangle", "ellipse"}
+    if not isinstance(operation_type, str) or operation_type not in operation_types:
+        raise DrawingDataError("operation_type is not a supported drawing tool")
     color = payload["color"]
     if not isinstance(color, str) or not _HEX_COLOR.fullmatch(color):
         raise DrawingDataError("color must be a six-digit hexadecimal color")
@@ -44,6 +45,8 @@ def validate_drawing_operation(
         raise DrawingDataError("points must be a non-empty list")
     if len(points) > MAX_STROKE_POINTS:
         raise DrawingDataError(f"a stroke may contain at most {MAX_STROKE_POINTS} points")
+    if operation_type in {"line", "rectangle", "ellipse"} and len(points) != 2:
+        raise DrawingDataError("shape operations must contain exactly two endpoints")
 
     clean_points: list[list[float | int]] = []
     for point in points:

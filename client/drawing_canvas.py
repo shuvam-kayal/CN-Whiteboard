@@ -4,7 +4,7 @@ import math
 import uuid
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPen
+from PySide6.QtGui import QColor, QFontMetrics, QImage, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
 from client.drawing_engine import DrawingEngine, DrawingOperation
@@ -30,8 +30,8 @@ class DrawingCanvas(QWidget):
         self.brush_size = 4.0
 
     def set_tool(self, tool: str) -> None:
-        if tool not in {"pen", "eraser"}:
-            raise ValueError("tool must be 'pen' or 'eraser'")
+        if tool not in {"pen", "eraser", "line", "rectangle", "ellipse"}:
+            raise ValueError("tool is not supported")
         self.tool = tool
 
     def set_pen_color(self, color: str) -> None:
@@ -62,6 +62,26 @@ class DrawingCanvas(QWidget):
         """Apply a complete authoritative snapshot and repaint once."""
         self.engine.replace_authoritative_state(operations)
         self.update()
+
+    def set_operation_active(self, sequence_number: int, active: bool) -> bool:
+        changed = self.engine.set_operation_active(sequence_number, active)
+        if changed:
+            self.update()
+        return changed
+
+    def export_png(self, path: str) -> bool:
+        """Write only the completed whiteboard at the widget's current dimensions."""
+        if not path:
+            return False
+        image = QImage(self.size(), QImage.Format.Format_ARGB32)
+        image.fill(QColor("white"))
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for operation in self.engine.operations:
+            if operation.active:
+                self._render_operation(painter, operation)
+        painter.end()
+        return image.save(path, "PNG")
 
     def confirm_local_operation(self, operation_id: str, sequence_number: int) -> None:
         if self.engine.confirm_local_operation(operation_id, sequence_number):
@@ -107,11 +127,12 @@ class DrawingCanvas(QWidget):
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
             self._emit_cursor_position(event)
+            operation_type = self.tool
             self.engine.begin_stroke(
                 self._event_point(event),
-                "#ffffff" if self.tool == "eraser" else self.pen_color,
+                "#ffffff" if operation_type == "eraser" else self.pen_color,
                 self.brush_size,
-                self.tool,
+                operation_type,
             )
             self.update()
             event.accept()
@@ -121,7 +142,10 @@ class DrawingCanvas(QWidget):
     def mouseMoveEvent(self, event) -> None:
         self._emit_cursor_position(event)
         if self.engine.current_operation is not None:
-            self.engine.add_point(self._event_point(event))
+            if self.engine.current_operation.operation_type in {"line", "rectangle", "ellipse"}:
+                self.engine.update_shape(self._event_point(event))
+            else:
+                self.engine.add_point(self._event_point(event))
             self.update()
             event.accept()
             return
@@ -146,7 +170,8 @@ class DrawingCanvas(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), QColor("white"))
         for operation in self.engine.operations:
-            self._render_operation(painter, operation)
+            if operation.active:
+                self._render_operation(painter, operation)
         if self.engine.current_operation is not None:
             self._render_operation(painter, self.engine.current_operation)
         for cursor in self.remote_cursors.values():
@@ -177,6 +202,19 @@ class DrawingCanvas(QWidget):
             Qt.PenJoinStyle.RoundJoin,
         )
         painter.setPen(pen)
+        if operation.operation_type == "line":
+            painter.drawLine(
+                QPointF(*operation.points[0]), QPointF(*operation.points[1])
+            )
+            return
+        if operation.operation_type in {"rectangle", "ellipse"}:
+            start, end = operation.points
+            bounds = QRectF(QPointF(*start), QPointF(*end)).normalized()
+            if operation.operation_type == "rectangle":
+                painter.drawRect(bounds)
+            else:
+                painter.drawEllipse(bounds)
+            return
         if len(operation.points) == 1:
             x, y = operation.points[0]
             painter.drawPoint(round(x), round(y))

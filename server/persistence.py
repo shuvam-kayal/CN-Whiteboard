@@ -12,7 +12,7 @@ from typing import Any
 from shared.drawing import DrawingDataError, validate_drawing_operation
 
 
-BOARD_FORMAT_VERSION = 1
+BOARD_FORMAT_VERSION = 3
 MAX_SAVED_OPERATIONS = 50_000
 MAX_BOARD_FILE_SIZE = 32 * 1024 * 1024
 _ROOM_CODE = re.compile(r"^[A-HJ-NP-Z2-9]{6}$")
@@ -24,6 +24,7 @@ _OPERATION_FIELDS = {
     "sequence_number",
     "participant_id",
     "room_code",
+    "active",
 }
 
 
@@ -40,6 +41,9 @@ class SavedBoard:
     room_code: str
     saved_at: str
     operations: list[dict[str, Any]]
+    undo_stacks: dict[str, list[int]]
+    redo_stacks: dict[str, list[int]]
+    participant_names: dict[str, str]
 
 
 class PersistenceManager:
@@ -49,9 +53,30 @@ class PersistenceManager:
         default_directory = Path(__file__).resolve().parents[1] / "data" / "boards"
         self.boards_directory = Path(boards_directory or default_directory).resolve()
 
-    def save_board(self, room_code: str, operations: list[dict]) -> SavedBoard:
+    def save_board(
+        self,
+        room_code: str,
+        operations: list[dict],
+        undo_stacks: dict[str, list[int]] | None = None,
+        redo_stacks: dict[str, list[int]] | None = None,
+        participant_names: dict[str, str] | None = None,
+    ) -> SavedBoard:
         code = self._validate_room_code(room_code)
         validated = self._validate_operations(code, operations)
+        if undo_stacks is None:
+            undo_stacks = self._default_undo_stacks(validated)
+        clean_undo, clean_redo = self._validate_stacks(
+            validated, undo_stacks, redo_stacks or {}
+        )
+        if participant_names is None:
+            participant_names = {
+                operation["participant_id"]: operation["participant_id"]
+                for operation in validated
+            }
+        clean_names = self._validate_participant_names(participant_names)
+        operation_owners = {operation["participant_id"] for operation in validated}
+        if not operation_owners.issubset(clean_names):
+            raise PersistenceError("invalid_board", "drawing participant metadata is incomplete")
         saved_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
             "+00:00", "Z"
         )
@@ -60,6 +85,9 @@ class PersistenceManager:
             "room_code": code,
             "saved_at": saved_at,
             "operations": validated,
+            "undo_stacks": clean_undo,
+            "redo_stacks": clean_redo,
+            "participant_names": clean_names,
         }
         encoded = json.dumps(
             document, ensure_ascii=False, indent=2, allow_nan=False
@@ -93,7 +121,7 @@ class PersistenceManager:
                 except OSError:
                     pass
 
-        return SavedBoard(code, saved_at, validated)
+        return SavedBoard(code, saved_at, validated, clean_undo, clean_redo, clean_names)
 
     def load_board(self, room_code: str) -> SavedBoard:
         code = self._validate_room_code(room_code)
@@ -108,16 +136,48 @@ class PersistenceManager:
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise PersistenceError("invalid_board", f"could not read board save: {exc}") from exc
 
-        if not isinstance(document, dict) or set(document) != {
-            "format_version",
-            "room_code",
-            "saved_at",
-            "operations",
-        }:
+        if not isinstance(document, dict):
             raise PersistenceError("invalid_board", "saved board has an invalid structure")
-        version = document["format_version"]
-        if isinstance(version, bool) or version != BOARD_FORMAT_VERSION:
+        version = document.get("format_version")
+        legacy_fields = {"format_version", "room_code", "saved_at", "operations"}
+        version_two_fields = legacy_fields | {"undo_stacks", "redo_stacks"}
+        current_fields = version_two_fields | {"participant_names"}
+        if isinstance(version, bool) or not isinstance(version, int):
             raise PersistenceError("invalid_board", "saved board version is unsupported")
+        valid_fields = {
+            1: legacy_fields,
+            2: version_two_fields,
+            BOARD_FORMAT_VERSION: current_fields,
+        }
+        if version not in valid_fields or set(document) != valid_fields[version]:
+            raise PersistenceError("invalid_board", "saved board has an invalid structure")
+        if document["format_version"] == 1:
+            if not isinstance(document.get("operations"), list):
+                raise PersistenceError("invalid_board", "saved operations must be a list")
+            legacy_operations = []
+            for operation in document["operations"]:
+                if not isinstance(operation, dict):
+                    raise PersistenceError("invalid_board", "saved operation is invalid")
+                legacy_operations.append({**operation, "active": True})
+            operations = self._validate_operations(code, legacy_operations)
+            undo_stacks = self._default_undo_stacks(operations)
+            redo_stacks: dict[str, list[int]] = {}
+        else:
+            operations = self._validate_operations(code, document["operations"])
+            undo_stacks, redo_stacks = self._validate_stacks(
+                operations, document["undo_stacks"], document["redo_stacks"]
+            )
+        if document["format_version"] == BOARD_FORMAT_VERSION:
+            participant_names = self._validate_participant_names(document["participant_names"])
+            operation_owners = {operation["participant_id"] for operation in operations}
+            if not operation_owners.issubset(participant_names):
+                raise PersistenceError("invalid_board", "drawing participant metadata is incomplete")
+        else:
+            # Older board formats had no usernames; preserve their owners opaquely.
+            participant_names = {
+                operation["participant_id"]: operation["participant_id"]
+                for operation in operations
+            }
         if document["room_code"] != code:
             raise PersistenceError("invalid_board", "saved board room code does not match")
         saved_at = document["saved_at"]
@@ -129,8 +189,65 @@ class PersistenceManager:
             raise PersistenceError("invalid_board", "saved board timestamp is invalid") from exc
         if timestamp.tzinfo is None:
             raise PersistenceError("invalid_board", "saved board timestamp must include a timezone")
-        operations = self._validate_operations(code, document["operations"])
-        return SavedBoard(code, saved_at, operations)
+        return SavedBoard(code, saved_at, operations, undo_stacks, redo_stacks, participant_names)
+
+    @staticmethod
+    def _validate_participant_names(names: object) -> dict[str, str]:
+        if not isinstance(names, dict):
+            raise PersistenceError("invalid_board", "participant names must be an object")
+        if any(
+            not isinstance(participant_id, str)
+            or not participant_id
+            or not isinstance(username, str)
+            or not username
+            for participant_id, username in names.items()
+        ):
+            raise PersistenceError("invalid_board", "participant name metadata is invalid")
+        return dict(names)
+
+    @staticmethod
+    def _default_undo_stacks(operations: list[dict[str, Any]]) -> dict[str, list[int]]:
+        stacks: dict[str, list[int]] = {}
+        for operation in operations:
+            if operation["active"]:
+                stacks.setdefault(operation["participant_id"], []).append(
+                    operation["sequence_number"]
+                )
+        return stacks
+
+    @staticmethod
+    def _validate_stacks(
+        operations: list[dict[str, Any]], undo_stacks: object, redo_stacks: object
+    ) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
+        if not isinstance(undo_stacks, dict) or not isinstance(redo_stacks, dict):
+            raise PersistenceError("invalid_board", "undo/redo stacks must be objects")
+        by_sequence = {operation["sequence_number"]: operation for operation in operations}
+        used: set[int] = set()
+        checked: list[dict[str, list[int]]] = []
+        for stacks, should_be_active in ((undo_stacks, True), (redo_stacks, False)):
+            clean: dict[str, list[int]] = {}
+            for participant_id, sequences in stacks.items():
+                if not isinstance(participant_id, str) or not participant_id:
+                    raise PersistenceError("invalid_board", "undo/redo participant is invalid")
+                if not isinstance(sequences, list):
+                    raise PersistenceError("invalid_board", "undo/redo stack must be a list")
+                clean_sequences: list[int] = []
+                for sequence in sequences:
+                    if (
+                        isinstance(sequence, bool)
+                        or not isinstance(sequence, int)
+                        or sequence not in by_sequence
+                        or sequence in used
+                    ):
+                        raise PersistenceError("invalid_board", "undo/redo sequence is invalid")
+                    operation = by_sequence[sequence]
+                    if operation["participant_id"] != participant_id or operation["active"] is not should_be_active:
+                        raise PersistenceError("invalid_board", "undo/redo stack does not match operation state")
+                    used.add(sequence)
+                    clean_sequences.append(sequence)
+                clean[participant_id] = clean_sequences
+            checked.append(clean)
+        return checked[0], checked[1]
 
     @staticmethod
     def _validate_room_code(room_code: str) -> str:
@@ -145,12 +262,19 @@ class PersistenceManager:
 
         checked: list[dict[str, Any]] = []
         for expected_sequence, operation in enumerate(operations, start=1):
-            if not isinstance(operation, dict) or set(operation) != _OPERATION_FIELDS:
+            legacy_fields = _OPERATION_FIELDS - {"active"}
+            if not isinstance(operation, dict) or set(operation) not in (
+                _OPERATION_FIELDS,
+                legacy_fields,
+            ):
                 raise PersistenceError("invalid_board", "saved drawing operation has an invalid structure")
             if operation.get("room_code") != room_code:
                 raise PersistenceError("invalid_board", "drawing operation belongs to another room")
             if not isinstance(operation.get("participant_id"), str) or not operation["participant_id"]:
                 raise PersistenceError("invalid_board", "drawing operation participant is invalid")
+            active = operation.get("active", True)
+            if not isinstance(active, bool):
+                raise PersistenceError("invalid_board", "drawing operation status is invalid")
             try:
                 drawing = validate_drawing_operation(
                     {
@@ -171,6 +295,7 @@ class PersistenceManager:
                     **drawing,
                     "participant_id": operation["participant_id"],
                     "room_code": room_code,
+                    "active": active,
                 }
             )
         return checked

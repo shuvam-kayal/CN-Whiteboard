@@ -187,6 +187,19 @@ class TCPServer:
                             None,
                             change.operation,
                         )
+            elif message_type in {"undo_operation", "redo_operation"}:
+                if payload not in ({}, None):
+                    raise SessionError("invalid_request", "undo/redo payload must be empty")
+                action = "undo" if message_type == "undo_operation" else "redo"
+                with self._room_events_lock:
+                    change = self.sessions.change_drawing_status(client_id, action)
+                    for recipient_id in change.recipients:
+                        self._send_message(
+                            recipient_id,
+                            "drawing_operation_status",
+                            request_id if recipient_id == client_id else None,
+                            change.status,
+                        )
             elif message_type == "cursor_update":
                 with self._room_events_lock:
                     change = self.sessions.update_cursor(client_id, payload)

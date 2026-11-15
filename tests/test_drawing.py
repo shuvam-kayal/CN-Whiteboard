@@ -4,7 +4,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -29,6 +29,23 @@ def test_engine_stores_completed_operation_data() -> None:
         "pen", [(10.0, 12.0), (30.0, 32.0), (50.0, 52.0)], "#3867d6", 6
     )
     assert engine.operations == [operation]
+
+
+def test_engine_applies_authoritative_undo_redo_status() -> None:
+    engine = DrawingEngine()
+    assert engine.add_remote_operation(
+        {
+            "operation_type": "eraser",
+            "points": [[1, 2]],
+            "color": "#ffffff",
+            "brush_size": 8,
+            "sequence_number": 1,
+            "active": False,
+        }
+    )
+    assert engine.operations[0].active is False
+    assert engine.set_operation_active(1, True)
+    assert engine.operations[0].active is True
 
 
 def test_canvas_records_mouse_strokes_and_renders_them(app) -> None:
@@ -82,7 +99,67 @@ def test_eraser_and_clear_are_recorded_and_repainted(app) -> None:
     canvas.close()
 
 
-@pytest.mark.parametrize("operation_type", ["shape", "text", ""])
+@pytest.mark.parametrize("operation_type", ["triangle", "text", ""])
 def test_drawing_operation_rejects_non_stroke_types(operation_type: str) -> None:
     with pytest.raises(ValueError):
         DrawingOperation(operation_type, [(0, 0)], "#000000", 2)
+
+
+@pytest.mark.parametrize("tool", ["line", "rectangle", "ellipse"])
+def test_shape_tools_create_and_render_two_point_operations(app, tool) -> None:
+    canvas = DrawingCanvas()
+    canvas.resize(140, 110)
+    canvas.set_pen_color("#3867d6")
+    canvas.set_tool(tool)
+    canvas.show()
+    app.processEvents()
+
+    QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+    QTest.mouseMove(canvas, QPoint(100, 80), delay=10)
+    assert canvas.engine.current_operation is not None
+    assert len(canvas.engine.current_operation.points) == 2
+    preview = canvas.grab().toImage()
+    assert any(
+        preview.pixelColor(x, y) == QColor("#3867d6")
+        for x in range(19, 102)
+        for y in range(19, 82)
+    )
+    QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=QPoint(100, 80))
+    app.processEvents()
+
+    operation = canvas.engine.operations[0]
+    assert operation.operation_type == tool
+    assert operation.points == [(20.0, 20.0), (100.0, 80.0)]
+    image = canvas.grab().toImage()
+    assert any(
+        image.pixelColor(x, y) == QColor("#3867d6")
+        for x in range(19, 102)
+        for y in range(19, 82)
+    )
+    canvas.close()
+
+
+def test_png_export_has_canvas_dimensions_and_only_completed_board(tmp_path, app) -> None:
+    canvas = DrawingCanvas()
+    canvas.setMinimumSize(0, 0)
+    canvas.resize(173, 119)
+    canvas.set_tool("rectangle")
+    canvas.engine.begin_stroke((20, 20), "#3867d6", 4, "rectangle")
+    canvas.engine.update_shape((80, 70))
+    canvas.engine.finish_stroke()
+    canvas.set_remote_cursor(
+        {"participant_id": "p", "username": "Remote", "color": "#e4572e", "x": 0.4, "y": 0.4}
+    )
+    canvas.engine.begin_stroke((105, 20), "#e4572e", 4, "line")
+    canvas.engine.update_shape((155, 80))
+    target = tmp_path / "board.png"
+
+    assert canvas.export_png(str(target))
+    image = QImage(str(target))
+    assert image.width() == 173
+    assert image.height() == 119
+    assert image.pixelColor(0, 0) == QColor("white")
+    assert image.pixelColor(68, 47) == QColor("white")  # remote cursor is not exported
+    assert image.pixelColor(130, 50) == QColor("white")  # incomplete preview is not exported
+    assert image.pixelColor(20, 20) != QColor("white")
+    canvas.close()

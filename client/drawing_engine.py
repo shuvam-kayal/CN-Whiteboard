@@ -11,7 +11,7 @@ Point = tuple[float, float]
 
 @dataclass
 class DrawingOperation:
-    """One ordered pen or eraser stroke in canvas coordinates."""
+    """One ordered stroke or shape in canvas coordinates."""
 
     operation_type: str
     points: list[Point]
@@ -19,10 +19,11 @@ class DrawingOperation:
     brush_size: float
     sequence_number: int | None = None
     operation_id: str | None = None
+    active: bool = True
 
     def __post_init__(self) -> None:
-        if self.operation_type not in {"pen", "eraser"}:
-            raise ValueError("operation_type must be 'pen' or 'eraser'")
+        if self.operation_type not in {"pen", "eraser", "line", "rectangle", "ellipse"}:
+            raise ValueError("operation_type is not a supported drawing tool")
         if not isinstance(self.color, str) or not self.color:
             raise ValueError("color must be a non-empty string")
         if not isinstance(self.brush_size, (int, float)) or not math.isfinite(
@@ -30,7 +31,11 @@ class DrawingOperation:
         ) or self.brush_size <= 0:
             raise ValueError("brush_size must be a positive finite number")
         self.brush_size = float(self.brush_size)
+        if not isinstance(self.active, bool):
+            raise ValueError("active status must be a boolean")
         self.points = [self._point(point) for point in self.points]
+        if self.operation_type in {"line", "rectangle", "ellipse"} and len(self.points) != 2:
+            raise ValueError("shape operations require two endpoints")
         if self.sequence_number is not None and self.sequence_number < 1:
             raise ValueError("sequence_number must be positive")
 
@@ -75,7 +80,10 @@ class DrawingEngine:
         if self._current is not None:
             raise RuntimeError("a stroke is already in progress")
         self._current = DrawingOperation(
-            operation_type, [DrawingOperation._point(point)], color, brush_size
+            operation_type,
+            [DrawingOperation._point(point)] * (2 if operation_type in {"line", "rectangle", "ellipse"} else 1),
+            color,
+            brush_size,
         )
 
     def add_point(self, point: Point) -> None:
@@ -83,11 +91,21 @@ class DrawingEngine:
             raise RuntimeError("no stroke is in progress")
         self._current.points.append(DrawingOperation._point(point))
 
+    def update_shape(self, point: Point) -> None:
+        if self._current is None or self._current.operation_type not in {
+            "line", "rectangle", "ellipse"
+        }:
+            raise RuntimeError("no shape is in progress")
+        self._current.points[1] = DrawingOperation._point(point)
+
     def finish_stroke(self, point: Point | None = None) -> DrawingOperation | None:
         if self._current is None:
             return None
         if point is not None:
-            self.add_point(point)
+            if self._current.operation_type in {"line", "rectangle", "ellipse"}:
+                self.update_shape(point)
+            else:
+                self.add_point(point)
         operation = self._current
         self.operations.append(operation)
         self._current = None
@@ -107,6 +125,9 @@ class DrawingEngine:
             raise ValueError(str(exc)) from exc
 
         sequence = data["sequence_number"]
+        active = payload.get("active", True)
+        if not isinstance(active, bool):
+            raise ValueError("drawing operation active status must be a boolean")
         if sequence in self._remote_sequences:
             return False
         self._remote_sequences.add(sequence)
@@ -117,10 +138,21 @@ class DrawingEngine:
                 data["color"],
                 data["brush_size"],
                 sequence_number=sequence,
+                active=active,
             )
         )
         self._sort_confirmed_operations()
         return True
+
+    def set_operation_active(self, sequence_number: int, active: bool) -> bool:
+        """Apply an authoritative undo/redo status to one confirmed stroke."""
+        if not isinstance(active, bool):
+            raise ValueError("operation active status must be a boolean")
+        for operation in self.operations:
+            if operation.sequence_number == sequence_number:
+                operation.active = active
+                return True
+        return False
 
     def confirm_local_operation(self, operation_id: str, sequence_number: int) -> bool:
         """Attach the server sequence to an already rendered local operation."""

@@ -79,13 +79,35 @@ def test_persistence_manager_saves_validated_state_atomically(tmp_path) -> None:
     operation = {
         "operation_type": "pen", "points": [[1, 2]], "color": "#123456",
         "brush_size": 4, "sequence_number": 1, "participant_id": "member",
-        "room_code": "ABCD23",
+        "room_code": "ABCD23", "active": True,
     }
     saved = manager.save_board("ABCD23", [operation])
     loaded = manager.load_board("ABCD23")
     assert saved.operations == loaded.operations == [operation]
     assert (tmp_path / "ABCD23.json").exists()
     assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_slice_nine_board_file_loads_with_active_strokes(tmp_path) -> None:
+    old_operation = {
+        "operation_type": "pen", "points": [[1, 2]], "color": "#123456",
+        "brush_size": 4, "sequence_number": 1, "participant_id": "member",
+        "room_code": "ABCD23",
+    }
+    (tmp_path / "ABCD23.json").write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "room_code": "ABCD23",
+                "saved_at": "2026-11-15T00:00:00Z",
+                "operations": [old_operation],
+            }
+        ),
+        encoding="utf-8",
+    )
+    restored = PersistenceManager(tmp_path).load_board("ABCD23")
+    assert restored.operations[0]["active"] is True
+    assert restored.undo_stacks == {"member": [1]}
 
 
 @pytest.mark.parametrize("contents", ["{broken", "[]", json.dumps({"format_version": 99})])
