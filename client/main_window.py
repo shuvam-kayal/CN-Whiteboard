@@ -78,11 +78,19 @@ QLineEdit, QSpinBox {
     padding: 10px 12px; color: #202943; min-height: 20px;
 }
 QLineEdit:focus, QSpinBox:focus { border: 1px solid #7078ee; }
+QComboBox {
+    background: white; border: 1px solid #dce2ed; border-radius: 9px;
+    padding: 8px 10px; color: #202943; min-height: 20px;
+}
+QComboBox:focus { border: 1px solid #7078ee; }
 QPushButton {
     background: white; border: 1px solid #dce2ed; border-radius: 9px;
     color: #35405a; padding: 10px 14px; font-weight: 600;
 }
 QPushButton:hover { background: #f7f8ff; border-color: #aeb4f5; }
+QPushButton:checked {
+    background: #eef0ff; border-color: #9ca3f2; color: #3f47c2;
+}
 QPushButton#primaryButton {
     background: #5b63e8; border: 1px solid #5b63e8; color: white;
 }

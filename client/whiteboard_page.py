@@ -2,6 +2,8 @@
 
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtWidgets import (
+    QButtonGroup,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -10,6 +12,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from client.drawing_canvas import DrawingCanvas
 
 
 class WhiteboardPage(QWidget):
@@ -20,6 +24,7 @@ class WhiteboardPage(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(26, 22, 26, 24)
         root.setSpacing(16)
+        self.canvas = DrawingCanvas()
         root.addLayout(self._header())
         root.addWidget(self._toolbar())
 
@@ -57,8 +62,7 @@ class WhiteboardPage(QWidget):
         row.addWidget(self.leave_button)
         return row
 
-    @staticmethod
-    def _toolbar() -> QFrame:
+    def _toolbar(self) -> QFrame:
         frame = QFrame()
         frame.setObjectName("toolbar")
         row = QHBoxLayout(frame)
@@ -68,46 +72,78 @@ class WhiteboardPage(QWidget):
         label.setObjectName("eyebrow")
         row.addWidget(label)
         row.addSpacing(8)
-        for text in ("Select", "Pen", "Eraser", "Text", "Shapes"):
-            button = QPushButton(text)
-            button.setMinimumWidth(74)
-            button.setToolTip("Drawing tools are placeholders in this preview.")
-            row.addWidget(button)
+        self.pen_button = QPushButton("Pen")
+        self.pen_button.setObjectName("penToolButton")
+        self.pen_button.setCheckable(True)
+        self.pen_button.setChecked(True)
+        self.eraser_button = QPushButton("Eraser")
+        self.eraser_button.setObjectName("eraserToolButton")
+        self.eraser_button.setCheckable(True)
+        self.tool_group = QButtonGroup(self)
+        self.tool_group.setExclusive(True)
+        self.tool_group.addButton(self.pen_button)
+        self.tool_group.addButton(self.eraser_button)
+        self.pen_button.clicked.connect(lambda: self.canvas.set_tool("pen"))
+        self.eraser_button.clicked.connect(lambda: self.canvas.set_tool("eraser"))
+        row.addWidget(self.pen_button)
+        row.addWidget(self.eraser_button)
+
+        color_label = QLabel("Color")
+        color_label.setObjectName("muted")
+        row.addWidget(color_label)
+        self.color_combo = QComboBox()
+        self.color_combo.setObjectName("penColorCombo")
+        for name, color in (
+            ("Midnight", "#202943"),
+            ("Blue", "#3867d6"),
+            ("Coral", "#e05a5a"),
+            ("Green", "#279777"),
+            ("Violet", "#8858c8"),
+            ("Orange", "#dd812f"),
+        ):
+            self.color_combo.addItem(name, color)
+        self.color_combo.currentIndexChanged.connect(self._choose_color)
+        row.addWidget(self.color_combo)
+
+        size_label = QLabel("Size")
+        size_label.setObjectName("muted")
+        row.addWidget(size_label)
+        self.size_combo = QComboBox()
+        self.size_combo.setObjectName("brushSizeCombo")
+        for size in (2, 4, 6, 10, 14, 20):
+            self.size_combo.addItem(f"{size} px", size)
+        self.size_combo.setCurrentIndex(1)
+        self.size_combo.currentIndexChanged.connect(self._choose_size)
+        row.addWidget(self.size_combo)
+
+        self.clear_button = QPushButton("Clear canvas")
+        self.clear_button.setObjectName("clearCanvasButton")
+        self.clear_button.clicked.connect(self.canvas.clear)
+        row.addWidget(self.clear_button)
         row.addStretch()
-        note = QLabel("Toolbar preview")
-        note.setObjectName("muted")
-        row.addWidget(note)
         return frame
 
-    @staticmethod
-    def _canvas() -> QFrame:
+    def _choose_color(self, index: int) -> None:
+        color = self.color_combo.itemData(index)
+        if color:
+            self.canvas.set_pen_color(color)
+
+    def _choose_size(self, index: int) -> None:
+        size = self.size_combo.itemData(index)
+        if size:
+            self.canvas.set_brush_size(size)
+
+    def _canvas(self) -> QFrame:
         frame = QFrame()
-        frame.setObjectName("canvas")
+        frame.setObjectName("canvasFrame")
         frame.setMinimumWidth(450)
         frame.setStyleSheet(
-            "QFrame#canvas { background-color: #ffffff; border: 1px solid #e2e7f0;"
+            "QFrame#canvasFrame { background-color: #ffffff; border: 1px solid #e2e7f0;"
             " border-radius: 16px; }"
         )
         layout = QVBoxLayout(frame)
-        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        mark = QLabel("✦")
-        mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        mark.setStyleSheet(
-            "background: #eef0ff; color: #5b63e8; border-radius: 28px;"
-            " font-size: 24px; min-width: 56px; max-width: 56px;"
-            " min-height: 56px; max-height: 56px;"
-        )
-        title = QLabel("Your canvas starts here")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setStyleSheet("font-size: 20px; font-weight: 700; color: #34405b;")
-        description = QLabel("The drawing surface will be available in a future slice.")
-        description.setObjectName("muted")
-        description.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        description.setWordWrap(True)
-        layout.addWidget(mark, alignment=Qt.AlignmentFlag.AlignHCenter)
-        layout.addSpacing(12)
-        layout.addWidget(title)
-        layout.addWidget(description)
+        layout.setContentsMargins(1, 1, 1, 1)
+        layout.addWidget(self.canvas)
         return frame
 
     def _sidebar(self) -> QVBoxLayout:
