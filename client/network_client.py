@@ -57,6 +57,11 @@ class NetworkClient(QObject):
     def send_cursor_position(self, x: float, y: float) -> bool:
         return self.send_message("cursor_update", {"x": x, "y": y})
 
+    def send_chat_message(self, text: str) -> bool:
+        return self.send_message(
+            "chat_message", {"text": text}, request_id=uuid.uuid4().hex
+        )
+
     def close(self) -> None:
         self._stop.set()
         with self._socket_lock:

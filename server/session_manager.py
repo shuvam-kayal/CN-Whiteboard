@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import colorsys
+from datetime import datetime, timezone
 import math
 import secrets
 import threading
@@ -24,6 +25,7 @@ CURSOR_COLORS = (
     "#5c60d8",
     "#8a5a32",
 )
+MAX_CHAT_MESSAGE_LENGTH = 2_000
 
 
 class SessionError(ValueError):
@@ -77,6 +79,12 @@ class DrawingChange:
 @dataclass
 class CursorChange:
     cursor: dict
+    recipients: tuple[str, ...]
+
+
+@dataclass
+class ChatChange:
+    message: dict
     recipients: tuple[str, ...]
 
 
@@ -204,6 +212,37 @@ class SessionManager:
                 if other_client_id != client_id
             )
             return CursorChange(cursor, recipients)
+
+    def create_chat_message(self, client_id: str, payload: object) -> ChatChange:
+        """Validate room membership and add authoritative sender/time metadata."""
+        with self._lock:
+            room_code = self._client_rooms.get(client_id)
+            if room_code is None:
+                raise SessionError("not_in_room", "client must join a room before chatting")
+            if not isinstance(payload, dict) or set(payload) != {"text"}:
+                raise SessionError("invalid_message", "chat payload must contain only text")
+            text = payload["text"]
+            if not isinstance(text, str):
+                raise SessionError("invalid_message", "chat message text must be a string")
+            if not text.strip():
+                raise SessionError("empty_message", "chat message must not be empty")
+            if len(text) > MAX_CHAT_MESSAGE_LENGTH:
+                raise SessionError(
+                    "message_too_long",
+                    f"chat messages may contain at most {MAX_CHAT_MESSAGE_LENGTH} characters",
+                )
+
+            room = self._rooms[room_code]
+            participant = room.participants[client_id]
+            timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            message = {
+                "room_code": room.code,
+                "sender_id": participant.participant_id,
+                "username": participant.username,
+                "timestamp": timestamp.replace("+00:00", "Z"),
+                "text": text.strip(),
+            }
+            return ChatChange(message, tuple(room.participants))
 
     def _remove_participant(self, client_id: str) -> RoomChange | None:
         code = self._client_rooms.pop(client_id, None)

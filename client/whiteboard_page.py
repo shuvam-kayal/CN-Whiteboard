@@ -10,7 +10,9 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QLineEdit,
     QPushButton,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
@@ -22,6 +24,7 @@ class WhiteboardPage(QWidget):
     leave_requested = Signal()
     drawing_operation_completed = Signal(str, object)
     cursor_position_changed = Signal(float, float)
+    chat_message_requested = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -184,14 +187,30 @@ class WhiteboardPage(QWidget):
         return card
 
     def _chat_card(self) -> QFrame:
-        card = self._sidebar_card("Room chat", "Preview only")
-        chat_placeholder = QLabel(
-            "Chat will appear here\n\nMessaging is not connected in this preview."
-        )
-        chat_placeholder.setObjectName("muted")
-        chat_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        chat_placeholder.setWordWrap(True)
-        card.layout().addWidget(chat_placeholder, 1)
+        card = self._sidebar_card("Room chat", "Messages for this room")
+        self.chat_history = QTextBrowser()
+        self.chat_history.setObjectName("chatHistory")
+        self.chat_history.setOpenLinks(False)
+        self.chat_history.setStyleSheet("background: transparent; border: none;")
+        card.layout().addWidget(self.chat_history, 1)
+
+        self.chat_status = QLabel("")
+        self.chat_status.setObjectName("muted")
+        self.chat_status.setStyleSheet("font-size: 11px; color: #b53c4b;")
+        card.layout().addWidget(self.chat_status)
+
+        send_row = QHBoxLayout()
+        self.chat_input = QLineEdit()
+        self.chat_input.setObjectName("chatInput")
+        self.chat_input.setPlaceholderText("Write a message…")
+        self.chat_input.setMaxLength(2000)
+        self.chat_send_button = QPushButton("Send")
+        self.chat_send_button.setObjectName("chatSendButton")
+        self.chat_send_button.clicked.connect(self._send_chat_message)
+        self.chat_input.returnPressed.connect(self._send_chat_message)
+        send_row.addWidget(self.chat_input, 1)
+        send_row.addWidget(self.chat_send_button)
+        card.layout().addLayout(send_row)
         return card
 
     @staticmethod
@@ -234,6 +253,8 @@ class WhiteboardPage(QWidget):
         self.participant_activity.hide()
         self.canvas.remote_cursors.clear()
         self.canvas.clear()
+        self.chat_history.clear()
+        self.chat_status.clear()
 
     def update_participants(self, participants: list[dict]) -> None:
         current = {
@@ -288,6 +309,31 @@ class WhiteboardPage(QWidget):
 
     def set_remote_cursor(self, cursor: dict) -> None:
         self.canvas.set_remote_cursor(cursor)
+
+    def append_chat_message(self, message: dict) -> None:
+        """Append one server-authored room message in receive order."""
+        import html
+
+        username = html.escape(str(message.get("username", "Participant")))
+        timestamp = html.escape(str(message.get("timestamp", "")))
+        text = html.escape(str(message.get("text", ""))).replace("\n", "<br>")
+        self.chat_history.append(
+            f'<span style="color:#738099;font-size:11px"><b>{username}</b> · '
+            f"{timestamp}</span><br>{text}"
+        )
+        self.chat_status.clear()
+
+    def show_chat_status(self, message: str) -> None:
+        self.chat_status.setText(message)
+
+    def _send_chat_message(self) -> None:
+        text = self.chat_input.text().strip()
+        if not text:
+            self.show_chat_status("Enter a message before sending.")
+            return
+        self.chat_input.clear()
+        self.chat_status.clear()
+        self.chat_message_requested.emit(text)
 
     def _queue_cursor_position(self, x: float, y: float) -> None:
         self._pending_cursor = (x, y)

@@ -1,6 +1,6 @@
 # LAN Collaborative Whiteboard
 
-A Python desktop whiteboard project. It includes independent rooms, live participant lists and cursors, local pen/eraser drawing, and real-time stroke sharing over the newline-delimited JSON protocol.
+A Python desktop whiteboard project. It includes independent rooms, live participant lists and cursors, local pen/eraser drawing, real-time stroke sharing, and room-based group chat over the newline-delimited JSON protocol.
 
 ## Requirements
 

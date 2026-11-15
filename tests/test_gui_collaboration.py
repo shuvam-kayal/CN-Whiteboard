@@ -66,6 +66,7 @@ def test_remote_strokes_render_on_other_room_members_in_gui(app, server) -> None
     remote_update_threads = []
     add_remote = bob.whiteboard_page.add_remote_operation
     set_remote_cursor = bob.whiteboard_page.set_remote_cursor
+    append_chat_message = bob.whiteboard_page.append_chat_message
 
     def record_gui_thread(payload):
         remote_update_threads.append(QThread.currentThread() == gui_thread)
@@ -75,8 +76,13 @@ def test_remote_strokes_render_on_other_room_members_in_gui(app, server) -> None
         remote_update_threads.append(QThread.currentThread() == gui_thread)
         return set_remote_cursor(payload)
 
+    def record_chat_gui_thread(payload):
+        remote_update_threads.append(QThread.currentThread() == gui_thread)
+        return append_chat_message(payload)
+
     bob.whiteboard_page.add_remote_operation = record_gui_thread
     bob.whiteboard_page.set_remote_cursor = record_cursor_gui_thread
+    bob.whiteboard_page.append_chat_message = record_chat_gui_thread
 
     canvas = alice.whiteboard_page.canvas
     QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(45, 65))
@@ -112,6 +118,32 @@ def test_remote_strokes_render_on_other_room_members_in_gui(app, server) -> None
     assert remote_cursor["y"] == 0.33
     assert remote_cursor["color"] == "#e4572e"
     assert len(bob.whiteboard_page.canvas.engine.operations) == operation_count
+    assert all(remote_update_threads)
+
+    alice.whiteboard_page.chat_input.setText("First message from Alice")
+    QTest.mouseClick(
+        alice.whiteboard_page.chat_send_button, Qt.MouseButton.LeftButton
+    )
+    wait_until(
+        app,
+        lambda: "First message from Alice"
+        in bob.whiteboard_page.chat_history.toPlainText(),
+    )
+    alice.whiteboard_page.chat_input.setText("Second message from Alice")
+    QTest.mouseClick(
+        alice.whiteboard_page.chat_send_button, Qt.MouseButton.LeftButton
+    )
+    wait_until(
+        app,
+        lambda: "Second message from Alice"
+        in bob.whiteboard_page.chat_history.toPlainText(),
+    )
+    for page in (alice.whiteboard_page, bob.whiteboard_page):
+        history = page.chat_history.toPlainText()
+        assert history.index("First message from Alice") < history.index(
+            "Second message from Alice"
+        )
+        assert "Alice" in history
     assert all(remote_update_threads)
 
     alice.close()

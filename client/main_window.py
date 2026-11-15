@@ -37,6 +37,7 @@ class MainWindow(QMainWindow):
         self.whiteboard_page.cursor_position_changed.connect(
             self._send_cursor_position
         )
+        self.whiteboard_page.chat_message_requested.connect(self._send_chat_message)
 
     def _create_room(self, username: str, address: str, port: int) -> None:
         self._connect_to_room(
@@ -143,9 +144,18 @@ class MainWindow(QMainWindow):
                 and payload.get("participant_id") != self.participant_id
             ):
                 self.whiteboard_page.set_remote_cursor(payload)
+        elif message_type == "chat_message":
+            if payload.get("room_code") == self.room_code:
+                self.whiteboard_page.append_chat_message(payload)
         elif message_type == "error":
             message_text = str(payload.get("message", "Server rejected the request."))
-            if self.pages.currentWidget() is self.whiteboard_page:
+            if payload.get("code") in {
+                "empty_message",
+                "message_too_long",
+                "invalid_message",
+            }:
+                self.whiteboard_page.show_chat_status(message_text)
+            elif self.pages.currentWidget() is self.whiteboard_page:
                 self.whiteboard_page.set_connection_status(message_text)
             else:
                 self.welcome_page.show_status(message_text, is_error=True)
@@ -170,6 +180,12 @@ class MainWindow(QMainWindow):
         client = self.network_client
         if client is not None:
             client.send_cursor_position(x, y)
+
+    @Slot(str)
+    def _send_chat_message(self, text: str) -> None:
+        client = self.network_client
+        if client is None or not client.send_chat_message(text):
+            self.whiteboard_page.show_chat_status("Message was not sent · disconnected")
 
     def closeEvent(self, event) -> None:
         self._close_network_client()

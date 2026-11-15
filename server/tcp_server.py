@@ -187,6 +187,16 @@ class TCPServer:
                             None,
                             change.cursor,
                         )
+            elif message_type == "chat_message":
+                with self._room_events_lock:
+                    change = self.sessions.create_chat_message(client_id, payload)
+                    for recipient_id in change.recipients:
+                        self._send_message(
+                            recipient_id,
+                            "chat_message",
+                            None,
+                            change.message,
+                        )
             else:
                 self._send_message(client_id, message_type, request_id, payload)
         except SessionError as exc:
