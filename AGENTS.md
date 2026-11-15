@@ -15,4 +15,4 @@
 - Implement one slice at a time.
 - Add tests for new behavior.
 - Do not rewrite unrelated code.
-- Keep deferred features (drawing, rooms, chat, GUI networking, collaboration, and persistence) out until their planned slices.
+- Keep deferred features (drawing, chat, GUI networking, and persistence) out until their planned slices.

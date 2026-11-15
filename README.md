@@ -1,6 +1,6 @@
 # LAN Collaborative Whiteboard
 
-A Python desktop whiteboard project. Slice 2 provides a threaded TCP server using newline-delimited JSON messages. Whiteboard features will be added in later slices.
+A Python desktop whiteboard project. Slice 3 adds independent rooms and participant sessions over the threaded TCP server and newline-delimited JSON protocol. Whiteboard interaction features will be added in later slices.
 
 ## Requirements
 

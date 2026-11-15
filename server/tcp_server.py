@@ -2,7 +2,17 @@
 
 import socket
 import threading
+import uuid
+from dataclasses import dataclass, field
+
+from server.session_manager import RoomChange, SessionError, SessionManager
 from shared.protocol import MessageBuffer, ProtocolError, encode_message
+
+
+@dataclass
+class ClientConnection:
+    socket: socket.socket
+    send_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 class TCPServer:
@@ -16,8 +26,10 @@ class TCPServer:
         self._stopping = threading.Event()
         self._ready = threading.Event()
         self._lock = threading.Lock()
-        self._clients: set[socket.socket] = set()
+        self._room_events_lock = threading.Lock()
+        self._clients: dict[str, ClientConnection] = {}
         self._handlers: set[threading.Thread] = set()
+        self.sessions = SessionManager()
 
     def wait_until_ready(self, timeout: float | None = None) -> bool:
         """Wait until the listening socket has been bound."""
@@ -45,20 +57,21 @@ class TCPServer:
                         break
                     raise
 
+                client_id = uuid.uuid4().hex
                 handler = threading.Thread(
                     target=self._handle_client,
-                    args=(connection,),
+                    args=(client_id, connection),
                     daemon=True,
                 )
                 with self._lock:
-                    self._clients.add(connection)
+                    self._clients[client_id] = ClientConnection(connection)
                     self._handlers.add(handler)
                 handler.start()
         finally:
             self._ready.set()
             listener.close()
             with self._lock:
-                clients = list(self._clients)
+                clients = [client.socket for client in self._clients.values()]
                 handlers = list(self._handlers)
             for connection in clients:
                 self._close_socket(connection)
@@ -71,11 +84,11 @@ class TCPServer:
         """Request shutdown and disconnect clients so handlers can finish."""
         self._stopping.set()
         with self._lock:
-            clients = list(self._clients)
-        for connection in clients:
-            self._close_socket(connection)
+            clients = [client.socket for client in self._clients.values()]
+        for client_socket in clients:
+            self._close_socket(client_socket)
 
-    def _handle_client(self, connection: socket.socket) -> None:
+    def _handle_client(self, client_id: str, connection: socket.socket) -> None:
         message_buffer = MessageBuffer()
         try:
             while not self._stopping.is_set():
@@ -85,31 +98,111 @@ class TCPServer:
                 try:
                     messages = message_buffer.feed(data)
                 except ProtocolError as exc:
-                    self._send_protocol_error(connection, str(exc))
+                    self._send_message(
+                        client_id, "protocol_error", None, {"error": str(exc)}
+                    )
                     break
                 for message in messages:
-                    connection.sendall(
-                        encode_message(
-                            message["type"], message["request_id"], message["payload"]
-                        )
-                    )
+                    self._handle_message(client_id, message)
         except OSError:
             # A disconnect or server shutdown ends this client's handler only.
             pass
         finally:
+            with self._room_events_lock:
+                change = self.sessions.disconnect(client_id)
+                if change:
+                    self._broadcast_participants(change)
             self._close_socket(connection)
             with self._lock:
-                self._clients.discard(connection)
+                self._clients.pop(client_id, None)
                 self._handlers.discard(threading.current_thread())
 
-    @staticmethod
-    def _send_protocol_error(connection: socket.socket, detail: str) -> None:
-        """Report a bad message when possible, then let its handler close it."""
+    def _handle_message(self, client_id: str, message: dict) -> None:
+        """Route room commands and retain the protocol's generic JSON echo."""
+        message_type = message["type"]
+        request_id = message["request_id"]
+        payload = message["payload"]
         try:
-            connection.sendall(
-                encode_message("protocol_error", None, {"error": detail})
+            if message_type == "create_room":
+                if not isinstance(payload, dict):
+                    raise SessionError("invalid_request", "payload must be an object")
+                with self._room_events_lock:
+                    change = self.sessions.create_room(client_id, payload.get("username"))
+                    self._send_room_confirmation(client_id, "room_created", request_id, change)
+                    self._broadcast_participants(change)
+            elif message_type == "join_room":
+                if not isinstance(payload, dict):
+                    raise SessionError("invalid_request", "payload must be an object")
+                with self._room_events_lock:
+                    change = self.sessions.join_room(
+                        client_id, payload.get("room_code"), payload.get("username")
+                    )
+                    self._send_room_confirmation(client_id, "room_joined", request_id, change)
+                    self._broadcast_participants(change)
+            elif message_type == "leave_room":
+                with self._room_events_lock:
+                    change = self.sessions.leave_room(client_id)
+                    if change is None:
+                        raise SessionError("not_in_room", "client is not in a room")
+                    self._send_message(
+                        client_id,
+                        "room_left",
+                        request_id,
+                        {"room_code": change.room_code},
+                    )
+                    self._broadcast_participants(change)
+            else:
+                self._send_message(client_id, message_type, request_id, payload)
+        except SessionError as exc:
+            self._send_message(
+                client_id,
+                "error",
+                request_id,
+                {"code": exc.code, "message": str(exc)},
             )
+
+    def _send_room_confirmation(
+        self,
+        client_id: str,
+        message_type: str,
+        request_id: str | None,
+        change: RoomChange,
+    ) -> None:
+        participant = change.participant or {}
+        self._send_message(
+            client_id,
+            message_type,
+            request_id,
+            {
+                "room_code": change.room_code,
+                "participant_id": participant.get("participant_id"),
+                "username": participant.get("username"),
+                "is_host": participant.get("is_host", False),
+            },
+        )
+
+    def _broadcast_participants(self, change: RoomChange) -> None:
+        payload = {"room_code": change.room_code, "participants": change.participants}
+        for client_id in change.recipients:
+            self._send_message(client_id, "participants_updated", None, payload)
+
+    def _send_message(
+        self,
+        client_id: str,
+        message_type: str,
+        request_id: str | None,
+        payload: object,
+    ) -> None:
+        with self._lock:
+            client = self._clients.get(client_id)
+        if client is None:
+            return
+        try:
+            encoded = encode_message(message_type, request_id, payload)
+            with client.send_lock:
+                client.socket.sendall(encoded)
         except (OSError, ProtocolError):
+            # A vanished peer should not interrupt room updates for other clients.
             pass
 
     @staticmethod
