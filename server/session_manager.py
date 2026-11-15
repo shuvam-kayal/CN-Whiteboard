@@ -3,12 +3,15 @@
 from dataclasses import dataclass, field
 import colorsys
 from datetime import datetime, timezone
+import json
 import math
 import secrets
 import threading
+import time
 import uuid
 
 from shared.drawing import DrawingDataError, validate_drawing_operation
+from shared.protocol import MAX_MESSAGE_SIZE, ProtocolError, encode_message
 from server.persistence import PersistenceError, PersistenceManager
 
 
@@ -27,6 +30,7 @@ CURSOR_COLORS = (
     "#8a5a32",
 )
 MAX_CHAT_MESSAGE_LENGTH = 2_000
+MAX_ROOM_OPERATIONS = 50_000
 
 
 class SessionError(ValueError):
@@ -43,6 +47,7 @@ class Participant:
     username: str
     is_host: bool
     cursor_color: str
+    resume_token: str
 
     def as_dict(self) -> dict[str, str | bool]:
         return {
@@ -61,6 +66,9 @@ class Room:
     undo_stacks: dict[str, list[int]] = field(default_factory=dict)
     redo_stacks: dict[str, list[int]] = field(default_factory=dict)
     participant_names: dict[str, str] = field(default_factory=dict)
+    disconnected_at: float | None = None
+    resume_tokens: dict[str, str] = field(default_factory=dict)
+    drawing_state_bytes: int = 0
 
     def participant_list(self) -> list[dict[str, str | bool]]:
         return [participant.as_dict() for participant in self.participants.values()]
@@ -72,6 +80,8 @@ class RoomChange:
     participant: dict[str, str | bool] | None
     participants: list[dict[str, str | bool]]
     recipients: tuple[str, ...]
+    resume_token: str | None = None
+    replaced_client_id: str | None = None
 
 
 @dataclass
@@ -109,16 +119,41 @@ class DrawingStatusChange:
 class SessionManager:
     """Manage independent rooms and map connected clients to memberships."""
 
-    def __init__(self, persistence: PersistenceManager | None = None) -> None:
+    def __init__(
+        self,
+        persistence: PersistenceManager | None = None,
+        reconnect_grace_period: float = 30.0,
+    ) -> None:
         self._rooms: dict[str, Room] = {}
         self._client_rooms: dict[str, str] = {}
         self._lock = threading.RLock()
         self.persistence = persistence or PersistenceManager()
+        self.reconnect_grace_period = max(0.0, reconnect_grace_period)
 
     @property
     def room_count(self) -> int:
         with self._lock:
-            return len(self._rooms)
+            return sum(bool(room.participants) for room in self._rooms.values())
+
+    def room_code_for_client(self, client_id: str) -> str | None:
+        """Return the caller's room code without exposing mutable state."""
+        with self._lock:
+            return self._client_rooms.get(client_id)
+
+    def prune_expired_rooms(self, now: float | None = None) -> int:
+        """Drop empty rooms after their bounded reconnect window expires."""
+        with self._lock:
+            current = time.monotonic() if now is None else now
+            expired = [
+                code
+                for code, room in self._rooms.items()
+                if not room.participants
+                and room.disconnected_at is not None
+                and current - room.disconnected_at >= self.reconnect_grace_period
+            ]
+            for code in expired:
+                del self._rooms[code]
+            return len(expired)
 
     def create_room(self, client_id: str, username: str) -> RoomChange:
         with self._lock:
@@ -126,21 +161,34 @@ class SessionManager:
             name = self._validate_username(username)
             code = self._new_room_code()
             participant = Participant(
-                uuid.uuid4().hex, name, True, CURSOR_COLORS[0]
+                uuid.uuid4().hex, name, True, CURSOR_COLORS[0], secrets.token_urlsafe(32)
             )
             room = Room(
                 code,
                 {client_id: participant},
                 [],
                 participant_names={participant.participant_id: participant.username},
+                resume_tokens={participant.resume_token: participant.participant_id},
             )
+            room.drawing_state_bytes = self._board_state_size(code, [])
             self._rooms[code] = room
             self._client_rooms[client_id] = code
             return self._change(room, participant)
 
-    def join_room(self, client_id: str, room_code: str, username: str) -> RoomChange:
+    def join_room(
+        self,
+        client_id: str,
+        room_code: str,
+        username: str,
+        resume_token: str | None = None,
+    ) -> RoomChange:
         with self._lock:
+            self.prune_expired_rooms()
             self._ensure_unassigned(client_id)
+            if resume_token is not None and (
+                not isinstance(resume_token, str) or len(resume_token) > 128
+            ):
+                raise SessionError("invalid_resume_token", "resume token is invalid")
             if not isinstance(room_code, str) or len(room_code) != ROOM_CODE_LENGTH or any(
                 character not in ROOM_CODE_ALPHABET for character in room_code.upper()
             ):
@@ -158,31 +206,69 @@ class SessionManager:
                     normalized_code, {}, saved.operations,
                     saved.undo_stacks, saved.redo_stacks, saved.participant_names
                 )
+                try:
+                    room.drawing_state_bytes = self._board_state_size(
+                        normalized_code, saved.operations
+                    )
+                except SessionError as exc:
+                    raise SessionError("board_too_large", str(exc)) from exc
                 self._rooms[normalized_code] = room
             requested_name = self._validate_username(username)
-            name = self._unique_username(room, requested_name)
-            restored_id = next(
-                (
-                    participant_id
-                    for participant_id, previous_name in room.participant_names.items()
-                    if previous_name.casefold() == name.casefold()
-                    and all(
-                        member.participant_id != participant_id
-                        for member in room.participants.values()
-                    )
-                ),
-                None,
-            )
-            participant = Participant(
-                restored_id or uuid.uuid4().hex,
-                name,
-                not room.participants,
-                self._next_cursor_color(room),
-            )
+            resume_id = room.resume_tokens.get(resume_token) if isinstance(resume_token, str) else None
+            replaced_client_id = None
+            resumed_participant = None
+            if resume_id is not None:
+                for old_client_id, current in tuple(room.participants.items()):
+                    if current.participant_id == resume_id:
+                        replaced_client_id = old_client_id
+                        resumed_participant = current
+                        room.participants.pop(old_client_id)
+                        self._client_rooms.pop(old_client_id, None)
+                        break
+            if resumed_participant is not None:
+                participant = resumed_participant
+            elif resume_id is not None:
+                previous_name = room.participant_names.get(resume_id, requested_name)
+                name = self._unique_username(room, previous_name)
+                participant = Participant(
+                    resume_id,
+                    name,
+                    not room.participants,
+                    self._next_cursor_color(room),
+                    resume_token,
+                )
+            else:
+                name = self._unique_username(room, requested_name)
+                restored_id = next(
+                    (
+                        participant_id
+                        for participant_id, previous_name in room.participant_names.items()
+                        if previous_name.casefold() == name.casefold()
+                        and all(
+                            member.participant_id != participant_id
+                            for member in room.participants.values()
+                        )
+                    ),
+                    None,
+                )
+                if restored_id is not None:
+                    for old_token, participant_id in tuple(room.resume_tokens.items()):
+                        if participant_id == restored_id:
+                            room.resume_tokens.pop(old_token, None)
+                token = secrets.token_urlsafe(32)
+                participant = Participant(
+                    restored_id or uuid.uuid4().hex,
+                    name,
+                    not room.participants,
+                    self._next_cursor_color(room),
+                    token,
+                )
+                room.resume_tokens[token] = participant.participant_id
             room.participants[client_id] = participant
             room.participant_names[participant.participant_id] = participant.username
+            room.disconnected_at = None
             self._client_rooms[client_id] = room.code
-            return self._change(room, participant)
+            return self._change(room, participant, replaced_client_id)
 
     def save_board(self, client_id: str) -> dict:
         """Persist the current room board after confirming the caller is its host."""
@@ -212,7 +298,9 @@ class SessionManager:
                 saved = self.persistence.load_board(room.code)
             except PersistenceError as exc:
                 raise SessionError(exc.code, str(exc)) from exc
+            state_size = self._board_state_size(room.code, saved.operations)
             room.drawing_operations = saved.operations
+            room.drawing_state_bytes = state_size
             room.undo_stacks = saved.undo_stacks
             room.redo_stacks = saved.redo_stacks
             room.participant_names = saved.participant_names
@@ -231,6 +319,18 @@ class SessionManager:
             raise SessionError("host_only", "only the room host may save or load the board")
         return room
 
+    @staticmethod
+    def _board_state_size(room_code: str, operations: list[dict]) -> int:
+        try:
+            return len(
+                encode_message(
+                    "board_state", None,
+                    {"room_code": room_code, "operations": operations},
+                )
+            ) - 1
+        except ProtocolError as exc:
+            raise SessionError("board_too_large", str(exc)) from exc
+
     def leave_room(self, client_id: str) -> RoomChange | None:
         with self._lock:
             return self._remove_participant(client_id)
@@ -238,7 +338,7 @@ class SessionManager:
     def disconnect(self, client_id: str) -> RoomChange | None:
         """Remove a disconnected client and return an update for survivors."""
         with self._lock:
-            return self._remove_participant(client_id)
+            return self._remove_participant(client_id, keep_empty=True)
 
     def add_drawing_operation(self, client_id: str, payload: object) -> DrawingChange:
         """Validate, sequence, store, and route a room member's stroke."""
@@ -247,6 +347,10 @@ class SessionManager:
             if room_code is None:
                 raise SessionError("not_in_room", "client must join a room before drawing")
             room = self._rooms[room_code]
+            if len(room.drawing_operations) >= MAX_ROOM_OPERATIONS:
+                raise SessionError(
+                    "operation_limit", f"rooms may contain at most {MAX_ROOM_OPERATIONS} operations"
+                )
             try:
                 operation = validate_drawing_operation(payload)
             except DrawingDataError as exc:
@@ -256,6 +360,19 @@ class SessionManager:
             operation["participant_id"] = room.participants[client_id].participant_id
             operation["room_code"] = room.code
             operation["active"] = True
+            operation_size = len(
+                json.dumps(
+                    operation, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+                ).encode("utf-8")
+            )
+            candidate_size = room.drawing_state_bytes + operation_size
+            if room.drawing_operations:
+                candidate_size += 1  # comma between JSON array entries
+            if candidate_size > MAX_MESSAGE_SIZE:
+                raise SessionError(
+                    "operation_limit", "room board has reached the protocol snapshot size limit"
+                )
+            room.drawing_state_bytes = candidate_size
             room.drawing_operations.append(operation)
             participant_id = room.participants[client_id].participant_id
             room.undo_stacks.setdefault(participant_id, []).append(operation["sequence_number"])
@@ -382,17 +499,25 @@ class SessionManager:
             }
             return ChatChange(message, tuple(room.participants))
 
-    def _remove_participant(self, client_id: str) -> RoomChange | None:
+    def _remove_participant(
+        self, client_id: str, *, keep_empty: bool = False
+    ) -> RoomChange | None:
         code = self._client_rooms.pop(client_id, None)
         if code is None:
             return None
         room = self._rooms[code]
         departing = room.participants.pop(client_id)
+        if not keep_empty:
+            room.resume_tokens.pop(departing.resume_token, None)
         if room.participants:
             # Keep the original host while present; otherwise promote the first remaining member.
             if departing.is_host:
                 next(iter(room.participants.values())).is_host = True
+            room.disconnected_at = None
             return self._change(room, None)
+        if keep_empty and self.reconnect_grace_period > 0:
+            room.disconnected_at = time.monotonic()
+            return RoomChange(code, departing.as_dict(), [], ())
         del self._rooms[code]
         return RoomChange(code, departing.as_dict(), [], ())
 
@@ -400,12 +525,15 @@ class SessionManager:
         self,
         room: Room,
         participant: Participant | None,
+        replaced_client_id: str | None = None,
     ) -> RoomChange:
         return RoomChange(
             room_code=room.code,
             participant=participant.as_dict() if participant else None,
             participants=room.participant_list(),
             recipients=tuple(room.participants),
+            resume_token=participant.resume_token if participant else None,
+            replaced_client_id=replaced_client_id,
         )
 
     def _ensure_unassigned(self, client_id: str) -> None:

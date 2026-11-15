@@ -67,24 +67,27 @@ class MainWindow(QMainWindow):
         message_type: str,
         payload: dict,
     ) -> None:
-        self._close_network_client()
+        self._close_network_client(leave_room=True)
         self.room_code = None
         self.participant_id = None
         self.welcome_page.show_status(f"Connecting to {address}:{port}…")
         client = NetworkClient(address, port, message_type, payload, self)
         client.message_received.connect(self._on_server_message)
         client.disconnected.connect(self._on_disconnected)
+        client.reconnecting.connect(self._on_reconnecting)
         self.network_client = client
         client.start()
 
-    def _close_network_client(self) -> None:
+    def _close_network_client(self, *, leave_room: bool = False) -> None:
         client = self.network_client
         self.network_client = None
         if client is not None:
+            if leave_room:
+                client.send_message("leave_room", {})
             client.close()
 
     def _leave_room(self) -> None:
-        self._close_network_client()
+        self._close_network_client(leave_room=True)
         self.room_code = None
         self.participant_id = None
         self.pages.setCurrentWidget(self.welcome_page)
@@ -106,19 +109,30 @@ class MainWindow(QMainWindow):
             if not isinstance(room_code, str) or not isinstance(participant_id, str):
                 self.welcome_page.show_status("Server returned invalid room details.", is_error=True)
                 return
+            previous_room = self.room_code
+            previous_participant = self.participant_id
+            same_membership = (
+                previous_room == room_code and previous_participant == participant_id
+            )
             self.room_code = room_code
             self.participant_id = participant_id
             client = self.network_client
             if client is None:
                 return
-            self.whiteboard_page.set_room(
-                username=str(payload.get("username", "Participant")),
-                room_code=room_code,
-                is_host=bool(payload.get("is_host", False)),
-                server_address=client.address,
-                server_port=client.port,
-                participant_id=participant_id,
-            )
+            if same_membership:
+                self.whiteboard_page.set_host_status(bool(payload.get("is_host", False)))
+                self.whiteboard_page.set_connection_status(
+                    f"Connected · {client.address}:{client.port}"
+                )
+            else:
+                self.whiteboard_page.set_room(
+                    username=str(payload.get("username", "Participant")),
+                    room_code=room_code,
+                    is_host=bool(payload.get("is_host", False)),
+                    server_address=client.address,
+                    server_port=client.port,
+                    participant_id=participant_id,
+                )
             self.pages.setCurrentWidget(self.whiteboard_page)
         elif message_type == "participants_updated":
             if payload.get("room_code") == self.room_code:
@@ -199,6 +213,13 @@ class MainWindow(QMainWindow):
         else:
             self.welcome_page.show_status(f"Connection failed · {reason}", is_error=True)
 
+    @Slot(str)
+    def _on_reconnecting(self, message: str) -> None:
+        if self.pages.currentWidget() is self.whiteboard_page:
+            self.whiteboard_page.set_connection_status(message)
+        else:
+            self.welcome_page.show_status(message, is_error=True)
+
     @Slot(str, object)
     def _send_drawing_operation(self, operation_id: str, payload: object) -> None:
         client = self.network_client
@@ -240,7 +261,7 @@ class MainWindow(QMainWindow):
             self.whiteboard_page.set_connection_status("Redo was not sent · disconnected")
 
     def closeEvent(self, event) -> None:
-        self._close_network_client()
+        self._close_network_client(leave_room=True)
         super().closeEvent(event)
 
 

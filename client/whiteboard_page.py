@@ -365,6 +365,11 @@ class WhiteboardPage(QWidget):
     def set_connection_status(self, message: str) -> None:
         self.connection_label.setText(message)
 
+    def set_host_status(self, is_host: bool) -> None:
+        self.is_host = is_host
+        self.save_board_button.setEnabled(is_host)
+        self.load_board_button.setEnabled(is_host)
+
     def add_remote_operation(self, operation: dict) -> bool:
         return self.canvas.add_remote_operation(operation)
 
