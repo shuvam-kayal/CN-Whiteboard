@@ -1,6 +1,6 @@
 # LAN Collaborative Whiteboard
 
-A Python desktop whiteboard project. Slice 3 adds independent rooms and participant sessions over the threaded TCP server and newline-delimited JSON protocol. Whiteboard interaction features will be added in later slices.
+A Python desktop whiteboard project. It includes independent rooms, local pen/eraser drawing, and real-time stroke sharing between participants in the same room over the newline-delimited JSON protocol.
 
 ## Requirements
 
@@ -25,6 +25,8 @@ Launch the desktop client:
 ```powershell
 python run_client.py
 ```
+
+Create a room from the client, then have other clients join with its room code. Select a pen color and size in the toolbar; completed pen and eraser strokes are sent to other room participants.
 
 Start the TCP server (defaults to all IPv4 interfaces on port 5000):
 

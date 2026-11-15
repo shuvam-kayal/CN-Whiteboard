@@ -30,7 +30,7 @@ class WelcomePage(QWidget):
         body.addWidget(self._form_card(), 1)
         root.addLayout(body, 1)
 
-        footer = QLabel("A local preview · Room and server details are mock data in this slice")
+        footer = QLabel("Connect to a room over TCP · Drawing is shared with room participants")
         footer.setObjectName("muted")
         root.addWidget(footer, alignment=Qt.AlignmentFlag.AlignLeft)
 
@@ -210,3 +210,8 @@ class WelcomePage(QWidget):
             return None
         self.error_label.clear()
         return username
+
+    def show_status(self, message: str, *, is_error: bool = False) -> None:
+        color = "#b53c4b" if is_error else "#66728b"
+        self.error_label.setStyleSheet(f"color: {color}; font-size: 12px;")
+        self.error_label.setText(message)

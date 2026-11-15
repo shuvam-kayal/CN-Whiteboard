@@ -1,16 +1,20 @@
 """PySide6 canvas that renders local drawing operations and mouse strokes."""
 
 import math
+import uuid
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
 from client.drawing_engine import DrawingEngine, DrawingOperation
+from shared.drawing import MAX_BRUSH_SIZE
 
 
 class DrawingCanvas(QWidget):
     """Mouse-driven canvas backed by a replayable local operation list."""
+
+    operation_completed = Signal(str, dict)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -29,18 +33,32 @@ class DrawingCanvas(QWidget):
         self.tool = tool
 
     def set_pen_color(self, color: str) -> None:
-        if not QColor(color).isValid():
+        parsed = QColor(color)
+        if not parsed.isValid():
             raise ValueError("color must be a valid Qt color")
-        self.pen_color = color
+        self.pen_color = parsed.name(QColor.NameFormat.HexRgb)
 
     def set_brush_size(self, size: float) -> None:
-        if not math.isfinite(size) or size <= 0:
-            raise ValueError("brush size must be a positive finite number")
+        if not math.isfinite(size) or not 0 < size <= MAX_BRUSH_SIZE:
+            raise ValueError(
+                f"brush size must be positive and at most {MAX_BRUSH_SIZE:g}"
+            )
         self.brush_size = float(size)
 
     def clear(self) -> None:
         self.engine.clear()
         self.update()
+
+    def add_remote_operation(self, payload: object) -> bool:
+        """Apply a server operation on the GUI thread and repaint the canvas."""
+        added = self.engine.add_remote_operation(payload)
+        if added:
+            self.update()
+        return added
+
+    def confirm_local_operation(self, operation_id: str, sequence_number: int) -> None:
+        if self.engine.confirm_local_operation(operation_id, sequence_number):
+            self.update()
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -65,7 +83,12 @@ class DrawingCanvas(QWidget):
 
     def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            self.engine.finish_stroke(self._event_point(event))
+            operation = self.engine.finish_stroke(self._event_point(event))
+            if operation is not None:
+                operation.operation_id = uuid.uuid4().hex
+                self.operation_completed.emit(
+                    operation.operation_id, operation.to_payload()
+                )
             self.update()
             event.accept()
             return

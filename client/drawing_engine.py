@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 import math
 
+from shared.drawing import DrawingDataError, validate_drawing_operation
+
 
 Point = tuple[float, float]
 
@@ -15,6 +17,8 @@ class DrawingOperation:
     points: list[Point]
     color: str
     brush_size: float
+    sequence_number: int | None = None
+    operation_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.operation_type not in {"pen", "eraser"}:
@@ -27,6 +31,17 @@ class DrawingOperation:
             raise ValueError("brush_size must be a positive finite number")
         self.brush_size = float(self.brush_size)
         self.points = [self._point(point) for point in self.points]
+        if self.sequence_number is not None and self.sequence_number < 1:
+            raise ValueError("sequence_number must be positive")
+
+    def to_payload(self) -> dict:
+        """Return only the drawing data sent to the server."""
+        return {
+            "operation_type": self.operation_type,
+            "points": [[x, y] for x, y in self.points],
+            "color": self.color,
+            "brush_size": self.brush_size,
+        }
 
     @staticmethod
     def _point(point: Point) -> Point:
@@ -44,6 +59,7 @@ class DrawingEngine:
     def __init__(self) -> None:
         self.operations: list[DrawingOperation] = []
         self._current: DrawingOperation | None = None
+        self._remote_sequences: set[int] = set()
 
     @property
     def current_operation(self) -> DrawingOperation | None:
@@ -77,6 +93,59 @@ class DrawingEngine:
         self._current = None
         return operation
 
+    def add_remote_operation(self, payload: object) -> bool:
+        """Store one validated server operation, ignoring duplicate sequences."""
+        if not isinstance(payload, dict):
+            raise ValueError("drawing operation must be an object")
+        fields = ("operation_type", "points", "color", "brush_size", "sequence_number")
+        try:
+            data = validate_drawing_operation(
+                {field: payload.get(field) for field in fields},
+                allow_sequence_number=True,
+            )
+        except DrawingDataError as exc:
+            raise ValueError(str(exc)) from exc
+
+        sequence = data["sequence_number"]
+        if sequence in self._remote_sequences:
+            return False
+        self._remote_sequences.add(sequence)
+        self.operations.append(
+            DrawingOperation(
+                data["operation_type"],
+                [(point[0], point[1]) for point in data["points"]],
+                data["color"],
+                data["brush_size"],
+                sequence_number=sequence,
+            )
+        )
+        self._sort_confirmed_operations()
+        return True
+
+    def confirm_local_operation(self, operation_id: str, sequence_number: int) -> bool:
+        """Attach the server sequence to an already rendered local operation."""
+        if (
+            not isinstance(sequence_number, int)
+            or isinstance(sequence_number, bool)
+            or sequence_number < 1
+        ):
+            raise ValueError("sequence_number must be a positive integer")
+        for operation in self.operations:
+            if operation.operation_id == operation_id:
+                operation.sequence_number = sequence_number
+                self._sort_confirmed_operations()
+                return True
+        return False
+
+    def _sort_confirmed_operations(self) -> None:
+        self.operations.sort(
+            key=lambda operation: (
+                operation.sequence_number is None,
+                operation.sequence_number or 0,
+            )
+        )
+
     def clear(self) -> None:
         self.operations.clear()
         self._current = None
+        self._remote_sequences.clear()

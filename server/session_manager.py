@@ -5,6 +5,8 @@ import secrets
 import threading
 import uuid
 
+from shared.drawing import DrawingDataError, validate_drawing_operation
+
 
 ROOM_CODE_LENGTH = 6
 ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -36,6 +38,7 @@ class Participant:
 class Room:
     code: str
     participants: dict[str, Participant]
+    drawing_operations: list[dict]
 
     def participant_list(self) -> list[dict[str, str | bool]]:
         return [participant.as_dict() for participant in self.participants.values()]
@@ -46,6 +49,12 @@ class RoomChange:
     room_code: str
     participant: dict[str, str | bool] | None
     participants: list[dict[str, str | bool]]
+    recipients: tuple[str, ...]
+
+
+@dataclass
+class DrawingChange:
+    operation: dict
     recipients: tuple[str, ...]
 
 
@@ -68,7 +77,7 @@ class SessionManager:
             name = self._validate_username(username)
             code = self._new_room_code()
             participant = Participant(uuid.uuid4().hex, name, True)
-            room = Room(code, {client_id: participant})
+            room = Room(code, {client_id: participant}, [])
             self._rooms[code] = room
             self._client_rooms[client_id] = code
             return self._change(room, participant)
@@ -99,6 +108,40 @@ class SessionManager:
         """Remove a disconnected client and return an update for survivors."""
         with self._lock:
             return self._remove_participant(client_id)
+
+    def add_drawing_operation(self, client_id: str, payload: object) -> DrawingChange:
+        """Validate, sequence, store, and route a room member's stroke."""
+        with self._lock:
+            room_code = self._client_rooms.get(client_id)
+            if room_code is None:
+                raise SessionError("not_in_room", "client must join a room before drawing")
+            room = self._rooms[room_code]
+            try:
+                operation = validate_drawing_operation(payload)
+            except DrawingDataError as exc:
+                raise SessionError("invalid_drawing_operation", str(exc)) from exc
+
+            operation["sequence_number"] = len(room.drawing_operations) + 1
+            operation["participant_id"] = room.participants[client_id].participant_id
+            operation["room_code"] = room.code
+            room.drawing_operations.append(operation)
+            recipients = tuple(
+                other_client_id
+                for other_client_id in room.participants
+                if other_client_id != client_id
+            )
+            return DrawingChange(dict(operation), recipients)
+
+    def get_drawing_operations(self, room_code: str) -> list[dict]:
+        """Return a copy of the in-memory room canvas history."""
+        with self._lock:
+            room = self._rooms.get(room_code.upper())
+            if room is None:
+                raise SessionError("room_not_found", "no room exists with that code")
+            return [
+                {**operation, "points": [point[:] for point in operation["points"]]}
+                for operation in room.drawing_operations
+            ]
 
     def _remove_participant(self, client_id: str) -> RoomChange | None:
         code = self._client_rooms.pop(client_id, None)

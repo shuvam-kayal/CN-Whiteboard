@@ -139,6 +139,13 @@ class TCPServer:
                     )
                     self._send_room_confirmation(client_id, "room_joined", request_id, change)
                     self._broadcast_participants(change)
+                    for operation in self.sessions.get_drawing_operations(change.room_code):
+                        self._send_message(
+                            client_id,
+                            "drawing_operation",
+                            None,
+                            operation,
+                        )
             elif message_type == "leave_room":
                 with self._room_events_lock:
                     change = self.sessions.leave_room(client_id)
@@ -151,6 +158,25 @@ class TCPServer:
                         {"room_code": change.room_code},
                     )
                     self._broadcast_participants(change)
+            elif message_type == "drawing_operation":
+                with self._room_events_lock:
+                    change = self.sessions.add_drawing_operation(client_id, payload)
+                    self._send_message(
+                        client_id,
+                        "drawing_accepted",
+                        request_id,
+                        {
+                            "room_code": change.operation["room_code"],
+                            "sequence_number": change.operation["sequence_number"],
+                        },
+                    )
+                    for recipient_id in change.recipients:
+                        self._send_message(
+                            recipient_id,
+                            "drawing_operation",
+                            None,
+                            change.operation,
+                        )
             else:
                 self._send_message(client_id, message_type, request_id, payload)
         except SessionError as exc:
