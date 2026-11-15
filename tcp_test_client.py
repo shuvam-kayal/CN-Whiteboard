@@ -1,7 +1,10 @@
 """Interactive terminal client for testing the raw TCP echo server."""
 
 import argparse
+import itertools
 import socket
+
+from shared.protocol import MessageBuffer, ProtocolError, encode_message
 
 
 def main() -> None:
@@ -12,6 +15,9 @@ def main() -> None:
 
     with socket.create_connection((args.host, args.port)) as connection:
         print(f"Connected to {args.host}:{args.port}. Enter text; type /quit to exit.")
+        message_buffer = MessageBuffer()
+        request_ids = itertools.count(1)
+        pending_responses = []
         while True:
             try:
                 message = input("> ")
@@ -19,18 +25,25 @@ def main() -> None:
                 break
             if message == "/quit":
                 break
-            payload = message.encode("utf-8")
-            if not payload:
+            if not message:
                 continue
-            connection.sendall(payload)
-            echoed = bytearray()
-            while len(echoed) < len(payload):
-                chunk = connection.recv(len(payload) - len(echoed))
-                if not chunk:
-                    print("Server disconnected.")
-                    return
-                echoed.extend(chunk)
-            print(f"Echo: {echoed.decode('utf-8', errors='replace')}")
+            request_id = str(next(request_ids))
+            connection.sendall(encode_message("echo", request_id, {"text": message}))
+            try:
+                while not pending_responses:
+                    chunk = connection.recv(4096)
+                    if not chunk:
+                        print("Server disconnected.")
+                        return
+                    pending_responses.extend(message_buffer.feed(chunk))
+            except ProtocolError as exc:
+                print(f"Invalid server response: {exc}")
+                return
+            response = pending_responses.pop(0)
+            if response["type"] == "protocol_error":
+                print(f"Server rejected the message: {response['payload']}")
+                return
+            print(f"Echo: {response['payload']}")
 
 
 if __name__ == "__main__":

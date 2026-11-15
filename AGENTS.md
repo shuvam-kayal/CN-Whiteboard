@@ -6,7 +6,7 @@
 - PySide6 for the desktop GUI
 - TCP sockets for networking
 - pytest for tests
-- JSON for future persistence
+- JSON for the wire protocol and future persistence
 
 ## Development rules
 
@@ -15,4 +15,4 @@
 - Implement one slice at a time.
 - Add tests for new behavior.
 - Do not rewrite unrelated code.
-- Keep deferred features (JSON messaging, drawing, rooms, chat, GUI networking, collaboration, and persistence) out until their planned slices.
+- Keep deferred features (drawing, rooms, chat, GUI networking, collaboration, and persistence) out until their planned slices.

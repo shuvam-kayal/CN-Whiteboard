@@ -1,11 +1,12 @@
-"""Small threaded raw TCP echo server for Slice 1."""
+"""Threaded TCP server using the shared newline-delimited JSON protocol."""
 
 import socket
 import threading
+from shared.protocol import MessageBuffer, ProtocolError, encode_message
 
 
 class TCPServer:
-    """Accept clients and echo received bytes until shutdown is requested."""
+    """Accept clients and echo validated JSON messages until shutdown."""
 
     def __init__(self, host: str = "0.0.0.0", port: int = 5000) -> None:
         self.host = host
@@ -75,12 +76,23 @@ class TCPServer:
             self._close_socket(connection)
 
     def _handle_client(self, connection: socket.socket) -> None:
+        message_buffer = MessageBuffer()
         try:
             while not self._stopping.is_set():
                 data = connection.recv(4096)
                 if not data:
                     break
-                connection.sendall(data)
+                try:
+                    messages = message_buffer.feed(data)
+                except ProtocolError as exc:
+                    self._send_protocol_error(connection, str(exc))
+                    break
+                for message in messages:
+                    connection.sendall(
+                        encode_message(
+                            message["type"], message["request_id"], message["payload"]
+                        )
+                    )
         except OSError:
             # A disconnect or server shutdown ends this client's handler only.
             pass
@@ -89,6 +101,16 @@ class TCPServer:
             with self._lock:
                 self._clients.discard(connection)
                 self._handlers.discard(threading.current_thread())
+
+    @staticmethod
+    def _send_protocol_error(connection: socket.socket, detail: str) -> None:
+        """Report a bad message when possible, then let its handler close it."""
+        try:
+            connection.sendall(
+                encode_message("protocol_error", None, {"error": detail})
+            )
+        except (OSError, ProtocolError):
+            pass
 
     @staticmethod
     def _close_socket(connection: socket.socket) -> None:

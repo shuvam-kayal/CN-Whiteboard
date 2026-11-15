@@ -1,7 +1,6 @@
 """Command-line entry point for the TCP echo server."""
 
 import argparse
-import threading
 
 from server.tcp_server import TCPServer
 

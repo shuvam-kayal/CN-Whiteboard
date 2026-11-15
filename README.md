@@ -1,6 +1,6 @@
 # LAN Collaborative Whiteboard
 
-A Python desktop whiteboard project. Slice 1 provides a threaded raw TCP echo server for connection checks. The JSON protocol and whiteboard features will be added in later slices.
+A Python desktop whiteboard project. Slice 2 provides a threaded TCP server using newline-delimited JSON messages. Whiteboard features will be added in later slices.
 
 ## Requirements
 
@@ -26,7 +26,7 @@ Launch the desktop client:
 python run_client.py
 ```
 
-Start the TCP echo server (defaults to all IPv4 interfaces on port 5000):
+Start the TCP server (defaults to all IPv4 interfaces on port 5000):
 
 ```powershell
 python run_server.py
@@ -40,7 +40,7 @@ In another terminal, connect an interactive test client:
 python tcp_test_client.py --host 127.0.0.1 --port 5000
 ```
 
-Enter text to receive the raw byte echo, or type `/quit` to disconnect.
+Enter text to receive a JSON echo response, or type `/quit` to disconnect.
 
 ## Tests
 
