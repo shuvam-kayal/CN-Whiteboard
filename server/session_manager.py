@@ -9,6 +9,7 @@ import threading
 import uuid
 
 from shared.drawing import DrawingDataError, validate_drawing_operation
+from server.persistence import PersistenceError, PersistenceManager
 
 
 ROOM_CODE_LENGTH = 6
@@ -88,13 +89,22 @@ class ChatChange:
     recipients: tuple[str, ...]
 
 
+@dataclass
+class BoardLoadChange:
+    room_code: str
+    saved_at: str
+    operations: list[dict]
+    recipients: tuple[str, ...]
+
+
 class SessionManager:
     """Manage independent rooms and map connected clients to memberships."""
 
-    def __init__(self) -> None:
+    def __init__(self, persistence: PersistenceManager | None = None) -> None:
         self._rooms: dict[str, Room] = {}
         self._client_rooms: dict[str, str] = {}
         self._lock = threading.RLock()
+        self.persistence = persistence or PersistenceManager()
 
     @property
     def room_count(self) -> int:
@@ -124,15 +134,60 @@ class SessionManager:
             normalized_code = room_code.upper()
             room = self._rooms.get(normalized_code)
             if room is None:
-                raise SessionError("room_not_found", "no room exists with that code")
+                try:
+                    saved = self.persistence.load_board(normalized_code)
+                except PersistenceError as exc:
+                    code = "room_not_found" if exc.code == "board_not_found" else "board_restore_failed"
+                    message = "no room exists with that code" if code == "room_not_found" else str(exc)
+                    raise SessionError(code, message) from exc
+                room = Room(normalized_code, {}, saved.operations)
+                self._rooms[normalized_code] = room
             requested_name = self._validate_username(username)
             name = self._unique_username(room, requested_name)
             participant = Participant(
-                uuid.uuid4().hex, name, False, self._next_cursor_color(room)
+                uuid.uuid4().hex, name, not room.participants, self._next_cursor_color(room)
             )
             room.participants[client_id] = participant
             self._client_rooms[client_id] = room.code
             return self._change(room, participant)
+
+    def save_board(self, client_id: str) -> dict:
+        """Persist the current room board after confirming the caller is its host."""
+        with self._lock:
+            room = self._require_host_room(client_id)
+            try:
+                saved = self.persistence.save_board(room.code, room.drawing_operations)
+            except PersistenceError as exc:
+                raise SessionError(exc.code, str(exc)) from exc
+            return {
+                "room_code": room.code,
+                "saved_at": saved.saved_at,
+                "operation_count": len(saved.operations),
+            }
+
+    def load_board(self, client_id: str) -> BoardLoadChange:
+        """Replace room history from disk and return all room recipients."""
+        with self._lock:
+            room = self._require_host_room(client_id)
+            try:
+                saved = self.persistence.load_board(room.code)
+            except PersistenceError as exc:
+                raise SessionError(exc.code, str(exc)) from exc
+            room.drawing_operations = saved.operations
+            operations = [
+                {**operation, "points": [point[:] for point in operation["points"]]}
+                for operation in room.drawing_operations
+            ]
+            return BoardLoadChange(room.code, saved.saved_at, operations, tuple(room.participants))
+
+    def _require_host_room(self, client_id: str) -> Room:
+        room_code = self._client_rooms.get(client_id)
+        if room_code is None:
+            raise SessionError("not_in_room", "client must join a room first")
+        room = self._rooms[room_code]
+        if not room.participants[client_id].is_host:
+            raise SessionError("host_only", "only the room host may save or load the board")
+        return room
 
     def leave_room(self, client_id: str) -> RoomChange | None:
         with self._lock:

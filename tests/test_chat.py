@@ -53,6 +53,7 @@ def join_room(peer: ChatPeer, code: str, username: str) -> None:
     peer.send("join_room", "join", {"username": username, "room_code": code})
     peer.receive()  # room_joined
     peer.receive()  # participants_updated
+    assert peer.receive()["type"] == "board_state"
 
 
 def test_chat_is_broadcast_to_every_member_in_message_order_and_isolated(

@@ -28,6 +28,8 @@ python run_client.py
 
 Create a room from the client, then have other clients join with its room code. Select a pen color and size in the toolbar; completed pen and eraser strokes are sent to other room participants.
 
+The room host can use **Save board** and **Load board** in the whiteboard toolbar. Board snapshots are validated JSON files in `data/boards/`. When a server restarts, the first participant to join a room with a saved board resumes as its host, and the current board is sent to each joining participant.
+
 Start the TCP server (defaults to all IPv4 interfaces on port 5000):
 
 ```powershell

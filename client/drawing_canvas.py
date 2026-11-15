@@ -58,6 +58,11 @@ class DrawingCanvas(QWidget):
             self.update()
         return added
 
+    def replace_board_state(self, operations: object) -> None:
+        """Apply a complete authoritative snapshot and repaint once."""
+        self.engine.replace_authoritative_state(operations)
+        self.update()
+
     def confirm_local_operation(self, operation_id: str, sequence_number: int) -> None:
         if self.engine.confirm_local_operation(operation_id, sequence_number):
             self.update()

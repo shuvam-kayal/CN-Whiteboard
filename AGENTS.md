@@ -15,4 +15,4 @@
 - Implement one slice at a time.
 - Add tests for new behavior.
 - Do not rewrite unrelated code.
-- Keep deferred features (undo/redo and persistence) out until their planned slices.
+- Keep deferred features (such as undo/redo) out until their planned slices.

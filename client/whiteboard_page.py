@@ -25,6 +25,8 @@ class WhiteboardPage(QWidget):
     drawing_operation_completed = Signal(str, object)
     cursor_position_changed = Signal(float, float)
     chat_message_requested = Signal(str)
+    save_board_requested = Signal()
+    load_board_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -135,6 +137,14 @@ class WhiteboardPage(QWidget):
         self.clear_button.setObjectName("clearCanvasButton")
         self.clear_button.clicked.connect(self.canvas.clear)
         row.addWidget(self.clear_button)
+        self.save_board_button = QPushButton("Save board")
+        self.save_board_button.setObjectName("saveBoardButton")
+        self.save_board_button.clicked.connect(self.save_board_requested.emit)
+        self.load_board_button = QPushButton("Load board")
+        self.load_board_button.setObjectName("loadBoardButton")
+        self.load_board_button.clicked.connect(self.load_board_requested.emit)
+        row.addWidget(self.save_board_button)
+        row.addWidget(self.load_board_button)
         row.addStretch()
         return frame
 
@@ -248,6 +258,9 @@ class WhiteboardPage(QWidget):
         self.connection_label.setText(f"Connected · {server_address}:{server_port}")
         self.username = username
         self.participant_id = participant_id
+        self.is_host = is_host
+        self.save_board_button.setEnabled(is_host)
+        self.load_board_button.setEnabled(is_host)
         self.participant_list.clear()
         self._known_participants.clear()
         self.participant_activity.hide()
@@ -255,6 +268,7 @@ class WhiteboardPage(QWidget):
         self.canvas.clear()
         self.chat_history.clear()
         self.chat_status.clear()
+        self.persistence_status = ""
 
     def update_participants(self, participants: list[dict]) -> None:
         current = {
@@ -303,6 +317,15 @@ class WhiteboardPage(QWidget):
 
     def add_remote_operation(self, operation: dict) -> bool:
         return self.canvas.add_remote_operation(operation)
+
+    def replace_board_state(self, operations: object) -> None:
+        self.canvas.replace_board_state(operations)
+
+    def set_persistence_status(self, message: str, *, is_error: bool = False) -> None:
+        self.persistence_status = message
+        color = "#b53c4b" if is_error else "#318064"
+        self.connection_label.setStyleSheet(f"color: {color};")
+        self.connection_label.setText(message)
 
     def confirm_local_operation(self, operation_id: str, sequence_number: int) -> None:
         self.canvas.confirm_local_operation(operation_id, sequence_number)

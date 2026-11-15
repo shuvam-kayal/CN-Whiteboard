@@ -4,7 +4,9 @@ import socket
 import threading
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 
+from server.persistence import PersistenceManager
 from server.session_manager import RoomChange, SessionError, SessionManager
 from shared.protocol import MessageBuffer, ProtocolError, encode_message
 
@@ -18,7 +20,12 @@ class ClientConnection:
 class TCPServer:
     """Accept clients and echo validated JSON messages until shutdown."""
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 5000) -> None:
+    def __init__(
+        self,
+        host: str = "0.0.0.0",
+        port: int = 5000,
+        boards_directory: str | Path | None = None,
+    ) -> None:
         self.host = host
         self.port = port
         self.server_address: tuple[str, int] | None = None
@@ -29,7 +36,8 @@ class TCPServer:
         self._room_events_lock = threading.Lock()
         self._clients: dict[str, ClientConnection] = {}
         self._handlers: set[threading.Thread] = set()
-        self.sessions = SessionManager()
+        self.persistence = PersistenceManager(boards_directory)
+        self.sessions = SessionManager(self.persistence)
 
     def wait_until_ready(self, timeout: float | None = None) -> bool:
         """Wait until the listening socket has been bound."""
@@ -139,13 +147,15 @@ class TCPServer:
                     )
                     self._send_room_confirmation(client_id, "room_joined", request_id, change)
                     self._broadcast_participants(change)
-                    for operation in self.sessions.get_drawing_operations(change.room_code):
-                        self._send_message(
-                            client_id,
-                            "drawing_operation",
-                            None,
-                            operation,
-                        )
+                    self._send_message(
+                        client_id,
+                        "board_state",
+                        None,
+                        {
+                            "room_code": change.room_code,
+                            "operations": self.sessions.get_drawing_operations(change.room_code),
+                        },
+                    )
             elif message_type == "leave_room":
                 with self._room_events_lock:
                     change = self.sessions.leave_room(client_id)
@@ -197,6 +207,29 @@ class TCPServer:
                             None,
                             change.message,
                         )
+            elif message_type in {"save_board", "load_board"}:
+                if payload not in ({}, None):
+                    raise SessionError("invalid_request", "board request payload must be empty")
+                with self._room_events_lock:
+                    if message_type == "save_board":
+                        result = self.sessions.save_board(client_id)
+                        self._send_message(client_id, "board_saved", request_id, result)
+                    else:
+                        change = self.sessions.load_board(client_id)
+                        self._send_message(
+                            client_id,
+                            "board_loaded",
+                            request_id,
+                            {"room_code": change.room_code, "saved_at": change.saved_at,
+                             "operation_count": len(change.operations)},
+                        )
+                        for recipient_id in change.recipients:
+                            self._send_message(
+                                recipient_id,
+                                "board_state",
+                                None,
+                                {"room_code": change.room_code, "operations": change.operations},
+                            )
             else:
                 self._send_message(client_id, message_type, request_id, payload)
         except SessionError as exc:

@@ -54,6 +54,9 @@ def join_room(client: JsonClient, code: str, username: str) -> tuple[dict, dict]
     client.send("join_room", "join", {"room_code": code, "username": username})
     joined = client.receive()
     participants_update = client.receive()
+    board_state = client.receive()
+    assert board_state["type"] == "board_state"
+    assert board_state["payload"]["operations"] == []
     return joined, participants_update
 
 

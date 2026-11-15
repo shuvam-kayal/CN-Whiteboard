@@ -53,7 +53,9 @@ def create_room(peer: Peer, username: str) -> tuple[str, dict]:
 def join_room(peer: Peer, room_code: str, username: str) -> list[dict]:
     peer.send("join_room", "join", {"username": username, "room_code": room_code})
     assert peer.receive()["type"] == "room_joined"
-    return peer.receive()["payload"]["participants"]
+    participants = peer.receive()["payload"]["participants"]
+    assert peer.receive()["type"] == "board_state"
+    return participants
 
 
 def test_participant_lists_update_on_join_leave_and_disconnect(live_server) -> None:

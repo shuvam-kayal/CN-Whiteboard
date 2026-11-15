@@ -137,6 +137,24 @@ class DrawingEngine:
                 return True
         return False
 
+    def replace_authoritative_state(self, operations: object) -> None:
+        """Replace the canvas history with a validated server snapshot."""
+        if not isinstance(operations, list):
+            raise ValueError("board state operations must be a list")
+        replacement = DrawingEngine()
+        for operation in operations:
+            if not isinstance(operation, dict):
+                raise ValueError("board state operation must be an object")
+            replacement.add_remote_operation(operation)
+        if len(replacement.operations) != len(operations):
+            raise ValueError("board state contains duplicate operation sequences")
+        sequences = [operation.sequence_number for operation in replacement.operations]
+        if sequences != list(range(1, len(sequences) + 1)):
+            raise ValueError("board state operation sequence is incomplete")
+        self.operations = replacement.operations
+        self._remote_sequences = replacement._remote_sequences
+        self._current = None
+
     def _sort_confirmed_operations(self) -> None:
         self.operations.sort(
             key=lambda operation: (

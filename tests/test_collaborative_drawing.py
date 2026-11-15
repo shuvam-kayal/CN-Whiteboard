@@ -56,6 +56,7 @@ def join_room(client: JsonSocketClient, room_code: str, username: str) -> str:
     )
     response = client.receive()
     client.receive()  # participants_updated for the joining client
+    client.receive()  # authoritative board_state
     return response["payload"]["participant_id"]
 
 
@@ -192,12 +193,14 @@ def test_joining_participant_receives_existing_room_canvas(drawing_server) -> No
         alice.send("drawing_operation", "stroke-before-join", stroke)
         assert alice.receive()["type"] == "drawing_accepted"
 
-        join_room(bob, room_code, "Bob")
-        replayed = bob.receive()
-        assert replayed["type"] == "drawing_operation"
-        assert replayed["payload"]["sequence_number"] == 1
-        assert replayed["payload"]["points"] == stroke["points"]
-        assert replayed["payload"]["participant_id"]
+        bob.send("join_room", "join-Bob", {"room_code": room_code, "username": "Bob"})
+        assert bob.receive()["type"] == "room_joined"
+        assert bob.receive()["type"] == "participants_updated"
+        snapshot = bob.receive()
+        assert snapshot["type"] == "board_state"
+        assert snapshot["payload"]["operations"][0]["sequence_number"] == 1
+        assert snapshot["payload"]["operations"][0]["points"] == stroke["points"]
+        assert snapshot["payload"]["operations"][0]["participant_id"]
         assert alice.receive()["type"] == "participants_updated"
     finally:
         alice.close()

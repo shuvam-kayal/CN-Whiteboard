@@ -38,6 +38,8 @@ class MainWindow(QMainWindow):
             self._send_cursor_position
         )
         self.whiteboard_page.chat_message_requested.connect(self._send_chat_message)
+        self.whiteboard_page.save_board_requested.connect(self._save_board)
+        self.whiteboard_page.load_board_requested.connect(self._load_board)
 
     def _create_room(self, username: str, address: str, port: int) -> None:
         self._connect_to_room(
@@ -147,6 +149,22 @@ class MainWindow(QMainWindow):
         elif message_type == "chat_message":
             if payload.get("room_code") == self.room_code:
                 self.whiteboard_page.append_chat_message(payload)
+        elif message_type == "board_state":
+            if payload.get("room_code") == self.room_code:
+                try:
+                    self.whiteboard_page.replace_board_state(payload.get("operations"))
+                except ValueError as exc:
+                    self.whiteboard_page.set_persistence_status(
+                        f"Rejected board state: {exc}", is_error=True
+                    )
+        elif message_type == "board_saved":
+            if payload.get("room_code") == self.room_code:
+                self.whiteboard_page.set_persistence_status(
+                    f"Saved {payload.get('operation_count', 0)} drawing operations."
+                )
+        elif message_type == "board_loaded":
+            if payload.get("room_code") == self.room_code:
+                self.whiteboard_page.set_persistence_status("Board loaded and synchronized.")
         elif message_type == "error":
             message_text = str(payload.get("message", "Server rejected the request."))
             if payload.get("code") in {
@@ -155,6 +173,11 @@ class MainWindow(QMainWindow):
                 "invalid_message",
             }:
                 self.whiteboard_page.show_chat_status(message_text)
+            elif payload.get("code") in {
+                "host_only", "board_not_found", "invalid_board", "save_failed",
+                "board_too_large", "board_restore_failed", "not_in_room",
+            } and self.pages.currentWidget() is self.whiteboard_page:
+                self.whiteboard_page.set_persistence_status(message_text, is_error=True)
             elif self.pages.currentWidget() is self.whiteboard_page:
                 self.whiteboard_page.set_connection_status(message_text)
             else:
@@ -186,6 +209,16 @@ class MainWindow(QMainWindow):
         client = self.network_client
         if client is None or not client.send_chat_message(text):
             self.whiteboard_page.show_chat_status("Message was not sent · disconnected")
+
+    def _save_board(self) -> None:
+        client = self.network_client
+        if client is None or not client.send_message("save_board", {}):
+            self.whiteboard_page.set_persistence_status("Board save was not sent · disconnected", is_error=True)
+
+    def _load_board(self) -> None:
+        client = self.network_client
+        if client is None or not client.send_message("load_board", {}):
+            self.whiteboard_page.set_persistence_status("Board load was not sent · disconnected", is_error=True)
 
     def closeEvent(self, event) -> None:
         self._close_network_client()
