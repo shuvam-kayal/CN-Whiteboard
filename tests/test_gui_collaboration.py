@@ -65,12 +65,18 @@ def test_remote_strokes_render_on_other_room_members_in_gui(app, server) -> None
     gui_thread = app.thread()
     remote_update_threads = []
     add_remote = bob.whiteboard_page.add_remote_operation
+    set_remote_cursor = bob.whiteboard_page.set_remote_cursor
 
     def record_gui_thread(payload):
         remote_update_threads.append(QThread.currentThread() == gui_thread)
         return add_remote(payload)
 
+    def record_cursor_gui_thread(payload):
+        remote_update_threads.append(QThread.currentThread() == gui_thread)
+        return set_remote_cursor(payload)
+
     bob.whiteboard_page.add_remote_operation = record_gui_thread
+    bob.whiteboard_page.set_remote_cursor = record_cursor_gui_thread
 
     canvas = alice.whiteboard_page.canvas
     QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(45, 65))
@@ -85,7 +91,7 @@ def test_remote_strokes_render_on_other_room_members_in_gui(app, server) -> None
     assert len(bob_operations) == 1
     assert bob_operations[0].sequence_number == 1
     assert bob_operations[0].points == alice_operations[0].points
-    assert remote_update_threads == [True]
+    assert remote_update_threads and all(remote_update_threads)
     image = bob.whiteboard_page.canvas.grab().toImage()
     color_pixels = [
         image.pixelColor(x, y).name()
@@ -95,5 +101,22 @@ def test_remote_strokes_render_on_other_room_members_in_gui(app, server) -> None
     ]
     assert color_pixels
 
+    operation_count = len(bob.whiteboard_page.canvas.engine.operations)
+    canvas.cursor_moved.emit(0.72, 0.33)
+    wait_until(
+        app,
+        lambda: alice.participant_id in bob.whiteboard_page.canvas.remote_cursors,
+    )
+    remote_cursor = bob.whiteboard_page.canvas.remote_cursors[alice.participant_id]
+    assert remote_cursor["x"] == 0.72
+    assert remote_cursor["y"] == 0.33
+    assert remote_cursor["color"] == "#e4572e"
+    assert len(bob.whiteboard_page.canvas.engine.operations) == operation_count
+    assert all(remote_update_threads)
+
     alice.close()
+    wait_until(app, lambda: bob.whiteboard_page.participant_list.count() == 1)
+    assert "Alice left" in bob.whiteboard_page.participant_activity.text()
+    assert alice.participant_id not in bob.whiteboard_page.canvas.remote_cursors
+
     bob.close()

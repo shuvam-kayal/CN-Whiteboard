@@ -3,8 +3,8 @@
 import math
 import uuid
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
 from client.drawing_engine import DrawingEngine, DrawingOperation
@@ -15,6 +15,7 @@ class DrawingCanvas(QWidget):
     """Mouse-driven canvas backed by a replayable local operation list."""
 
     operation_completed = Signal(str, dict)
+    cursor_moved = Signal(float, float)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -23,6 +24,7 @@ class DrawingCanvas(QWidget):
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.CrossCursor)
         self.engine = DrawingEngine()
+        self.remote_cursors: dict[str, dict] = {}
         self.tool = "pen"
         self.pen_color = "#202943"
         self.brush_size = 4.0
@@ -60,8 +62,46 @@ class DrawingCanvas(QWidget):
         if self.engine.confirm_local_operation(operation_id, sequence_number):
             self.update()
 
+    def set_remote_cursor(self, cursor: object) -> None:
+        if not isinstance(cursor, dict):
+            return
+        participant_id = cursor.get("participant_id")
+        username = cursor.get("username")
+        color = cursor.get("color")
+        x, y = cursor.get("x"), cursor.get("y")
+        if (
+            not isinstance(participant_id, str)
+            or not isinstance(username, str)
+            or not isinstance(color, str)
+            or not QColor(color).isValid()
+            or isinstance(x, bool)
+            or not isinstance(x, (int, float))
+            or isinstance(y, bool)
+            or not isinstance(y, (int, float))
+            or not math.isfinite(x)
+            or not math.isfinite(y)
+            or not 0 <= x <= 1
+            or not 0 <= y <= 1
+        ):
+            return
+        self.remote_cursors[participant_id] = {
+            "username": username,
+            "color": color,
+            "x": float(x),
+            "y": float(y),
+        }
+        self.update()
+
+    def remove_remote_cursors(self, participant_ids: set[str]) -> None:
+        removed = self.remote_cursors.keys() - participant_ids
+        if removed:
+            for participant_id in removed:
+                self.remote_cursors.pop(participant_id, None)
+            self.update()
+
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
+            self._emit_cursor_position(event)
             self.engine.begin_stroke(
                 self._event_point(event),
                 "#ffffff" if self.tool == "eraser" else self.pen_color,
@@ -74,6 +114,7 @@ class DrawingCanvas(QWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
+        self._emit_cursor_position(event)
         if self.engine.current_operation is not None:
             self.engine.add_point(self._event_point(event))
             self.update()
@@ -83,6 +124,7 @@ class DrawingCanvas(QWidget):
 
     def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
+            self._emit_cursor_position(event)
             operation = self.engine.finish_stroke(self._event_point(event))
             if operation is not None:
                 operation.operation_id = uuid.uuid4().hex
@@ -102,12 +144,21 @@ class DrawingCanvas(QWidget):
             self._render_operation(painter, operation)
         if self.engine.current_operation is not None:
             self._render_operation(painter, self.engine.current_operation)
+        for cursor in self.remote_cursors.values():
+            self._render_cursor(painter, cursor)
         painter.end()
 
     @staticmethod
     def _event_point(event) -> tuple[float, float]:
         position = event.position()
         return position.x(), position.y()
+
+    def _emit_cursor_position(self, event) -> None:
+        x, y = self._event_point(event)
+        self.cursor_moved.emit(
+            min(1.0, max(0.0, x / max(1, self.width() - 1))),
+            min(1.0, max(0.0, y / max(1, self.height() - 1))),
+        )
 
     @staticmethod
     def _render_operation(painter: QPainter, operation: DrawingOperation) -> None:
@@ -127,3 +178,32 @@ class DrawingCanvas(QWidget):
             return
         for start, end in zip(operation.points, operation.points[1:]):
             painter.drawLine(round(start[0]), round(start[1]), round(end[0]), round(end[1]))
+
+    def _render_cursor(self, painter: QPainter, cursor: dict) -> None:
+        x = cursor["x"] * max(1, self.width() - 1)
+        y = cursor["y"] * max(1, self.height() - 1)
+        color = QColor(cursor["color"])
+        painter.save()
+        painter.setPen(QPen(QColor("white"), 2))
+        painter.setBrush(color)
+        painter.drawEllipse(QPointF(x, y), 7, 7)
+
+        font = painter.font()
+        font.setBold(True)
+        font.setPointSize(9)
+        painter.setFont(font)
+        metrics = QFontMetrics(font)
+        text_width = metrics.horizontalAdvance(cursor["username"])
+        label_width = text_width + 14
+        label_x = x + 11
+        if label_x + label_width > self.width():
+            label_x = x - label_width - 11
+        label_x = max(1, min(self.width() - label_width - 1, label_x))
+        label_y = max(1, min(self.height() - 23, y - 27))
+        label_rect = QRectF(label_x, label_y, label_width, 21)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawRoundedRect(label_rect, 5, 5)
+        painter.setPen(QColor("white"))
+        painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, cursor["username"])
+        painter.restore()

@@ -34,6 +34,9 @@ class MainWindow(QMainWindow):
         self.whiteboard_page.drawing_operation_completed.connect(
             self._send_drawing_operation
         )
+        self.whiteboard_page.cursor_position_changed.connect(
+            self._send_cursor_position
+        )
 
     def _create_room(self, username: str, address: str, port: int) -> None:
         self._connect_to_room(
@@ -134,6 +137,12 @@ class MainWindow(QMainWindow):
                     self.whiteboard_page.set_connection_status(
                         f"Rejected drawing update: {exc}"
                     )
+        elif message_type == "cursor_update":
+            if (
+                payload.get("room_code") == self.room_code
+                and payload.get("participant_id") != self.participant_id
+            ):
+                self.whiteboard_page.set_remote_cursor(payload)
         elif message_type == "error":
             message_text = str(payload.get("message", "Server rejected the request."))
             if self.pages.currentWidget() is self.whiteboard_page:
@@ -155,6 +164,12 @@ class MainWindow(QMainWindow):
             return
         if not client.send_drawing_operation(operation_id, payload):
             self.whiteboard_page.set_connection_status("Drawing was not sent · disconnected")
+
+    @Slot(float, float)
+    def _send_cursor_position(self, x: float, y: float) -> None:
+        client = self.network_client
+        if client is not None:
+            client.send_cursor_position(x, y)
 
     def closeEvent(self, event) -> None:
         self._close_network_client()

@@ -1,6 +1,7 @@
 """Whiteboard layout, local canvas, and room participant display."""
 
-from PySide6.QtCore import Signal, Qt
+from PySide6.QtCore import QTimer, Signal, Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
@@ -8,6 +9,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QListWidget,
+    QListWidgetItem,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -19,6 +21,7 @@ from client.drawing_canvas import DrawingCanvas
 class WhiteboardPage(QWidget):
     leave_requested = Signal()
     drawing_operation_completed = Signal(str, object)
+    cursor_position_changed = Signal(float, float)
 
     def __init__(self) -> None:
         super().__init__()
@@ -27,6 +30,13 @@ class WhiteboardPage(QWidget):
         root.setSpacing(16)
         self.canvas = DrawingCanvas()
         self.canvas.operation_completed.connect(self.drawing_operation_completed.emit)
+        self.canvas.cursor_moved.connect(self._queue_cursor_position)
+        self._pending_cursor: tuple[float, float] | None = None
+        self._cursor_timer = QTimer(self)
+        self._cursor_timer.setSingleShot(True)
+        self._cursor_timer.setInterval(50)
+        self._cursor_timer.timeout.connect(self._send_pending_cursor)
+        self._known_participants: dict[str, str] = {}
         root.addLayout(self._header())
         root.addWidget(self._toolbar())
 
@@ -158,6 +168,15 @@ class WhiteboardPage(QWidget):
     def _participants_card(self) -> QFrame:
         card = self._sidebar_card("Participants", "Waiting for room…")
         self.participants_subtitle = card.layout().itemAt(1).widget()
+        self.participant_activity = QLabel("")
+        self.participant_activity.setObjectName("muted")
+        self.participant_activity.setStyleSheet("font-size: 11px; color: #5b63e8;")
+        self.participant_activity.hide()
+        self._activity_timer = QTimer(self)
+        self._activity_timer.setSingleShot(True)
+        self._activity_timer.setInterval(4000)
+        self._activity_timer.timeout.connect(self.participant_activity.hide)
+        card.layout().addWidget(self.participant_activity)
         self.participant_list = QListWidget()
         self.participant_list.setObjectName("participantList")
         self.participant_list.setMinimumWidth(250)
@@ -211,21 +230,52 @@ class WhiteboardPage(QWidget):
         self.username = username
         self.participant_id = participant_id
         self.participant_list.clear()
+        self._known_participants.clear()
+        self.participant_activity.hide()
+        self.canvas.remote_cursors.clear()
         self.canvas.clear()
 
     def update_participants(self, participants: list[dict]) -> None:
+        current = {
+            participant["participant_id"]: participant["username"]
+            for participant in participants
+            if isinstance(participant, dict)
+            and isinstance(participant.get("participant_id"), str)
+            and isinstance(participant.get("username"), str)
+        }
+        if self._known_participants:
+            joined = [name for key, name in current.items() if key not in self._known_participants]
+            left = [name for key, name in self._known_participants.items() if key not in current]
+            notices = []
+            if joined:
+                notices.append(f"{', '.join(joined)} joined")
+            if left:
+                notices.append(f"{', '.join(left)} left")
+            if notices:
+                self.participant_activity.setText(" · ".join(notices))
+                self.participant_activity.show()
+                self._activity_timer.start()
+
+        self._known_participants = current
         self.participant_list.clear()
         for participant in participants:
+            if not isinstance(participant, dict):
+                continue
             is_self = participant.get("participant_id") == self.participant_id
             host_suffix = " · Host" if participant.get("is_host") else ""
             self_suffix = " · You" if is_self else ""
-            self.participant_list.addItem(
+            item = QListWidgetItem(
                 f"●  {participant.get('username', 'Participant')}{host_suffix}{self_suffix}"
             )
+            color = participant.get("cursor_color")
+            if isinstance(color, str) and QColor(color).isValid():
+                item.setForeground(QColor(color))
+            self.participant_list.addItem(item)
         count = len(participants)
         self.participants_subtitle.setText(
             f"{count} participant" + ("" if count == 1 else "s")
         )
+        self.canvas.remove_remote_cursors(set(current))
 
     def set_connection_status(self, message: str) -> None:
         self.connection_label.setText(message)
@@ -235,3 +285,17 @@ class WhiteboardPage(QWidget):
 
     def confirm_local_operation(self, operation_id: str, sequence_number: int) -> None:
         self.canvas.confirm_local_operation(operation_id, sequence_number)
+
+    def set_remote_cursor(self, cursor: dict) -> None:
+        self.canvas.set_remote_cursor(cursor)
+
+    def _queue_cursor_position(self, x: float, y: float) -> None:
+        self._pending_cursor = (x, y)
+        if not self._cursor_timer.isActive():
+            self._cursor_timer.start()
+
+    def _send_pending_cursor(self) -> None:
+        if self._pending_cursor is not None:
+            x, y = self._pending_cursor
+            self._pending_cursor = None
+            self.cursor_position_changed.emit(x, y)

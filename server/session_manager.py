@@ -1,6 +1,8 @@
 """Thread-safe room and participant state, independent of socket handling."""
 
 from dataclasses import dataclass
+import colorsys
+import math
 import secrets
 import threading
 import uuid
@@ -10,6 +12,18 @@ from shared.drawing import DrawingDataError, validate_drawing_operation
 
 ROOM_CODE_LENGTH = 6
 ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+CURSOR_COLORS = (
+    "#e4572e",
+    "#3478f6",
+    "#239b72",
+    "#a855f7",
+    "#d08b00",
+    "#d946a8",
+    "#0e8f9a",
+    "#df3f4f",
+    "#5c60d8",
+    "#8a5a32",
+)
 
 
 class SessionError(ValueError):
@@ -25,12 +39,14 @@ class Participant:
     participant_id: str
     username: str
     is_host: bool
+    cursor_color: str
 
     def as_dict(self) -> dict[str, str | bool]:
         return {
             "participant_id": self.participant_id,
             "username": self.username,
             "is_host": self.is_host,
+            "cursor_color": self.cursor_color,
         }
 
 
@@ -58,6 +74,12 @@ class DrawingChange:
     recipients: tuple[str, ...]
 
 
+@dataclass
+class CursorChange:
+    cursor: dict
+    recipients: tuple[str, ...]
+
+
 class SessionManager:
     """Manage independent rooms and map connected clients to memberships."""
 
@@ -76,7 +98,9 @@ class SessionManager:
             self._ensure_unassigned(client_id)
             name = self._validate_username(username)
             code = self._new_room_code()
-            participant = Participant(uuid.uuid4().hex, name, True)
+            participant = Participant(
+                uuid.uuid4().hex, name, True, CURSOR_COLORS[0]
+            )
             room = Room(code, {client_id: participant}, [])
             self._rooms[code] = room
             self._client_rooms[client_id] = code
@@ -95,7 +119,9 @@ class SessionManager:
                 raise SessionError("room_not_found", "no room exists with that code")
             requested_name = self._validate_username(username)
             name = self._unique_username(room, requested_name)
-            participant = Participant(uuid.uuid4().hex, name, False)
+            participant = Participant(
+                uuid.uuid4().hex, name, False, self._next_cursor_color(room)
+            )
             room.participants[client_id] = participant
             self._client_rooms[client_id] = room.code
             return self._change(room, participant)
@@ -142,6 +168,42 @@ class SessionManager:
                 {**operation, "points": [point[:] for point in operation["points"]]}
                 for operation in room.drawing_operations
             ]
+
+    def update_cursor(self, client_id: str, payload: object) -> CursorChange:
+        """Validate a room member's normalized cursor position and route it."""
+        with self._lock:
+            room_code = self._client_rooms.get(client_id)
+            if room_code is None:
+                raise SessionError("not_in_room", "client must join a room before moving its cursor")
+            if not isinstance(payload, dict) or set(payload) != {"x", "y"}:
+                raise SessionError("invalid_cursor", "cursor payload must contain only x and y")
+
+            coordinates = (payload["x"], payload["y"])
+            if any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not 0 <= value <= 1
+                or not math.isfinite(value)
+                for value in coordinates
+            ):
+                raise SessionError("invalid_cursor", "cursor coordinates must be between 0 and 1")
+
+            room = self._rooms[room_code]
+            participant = room.participants[client_id]
+            cursor = {
+                "room_code": room.code,
+                "participant_id": participant.participant_id,
+                "username": participant.username,
+                "color": participant.cursor_color,
+                "x": float(payload["x"]),
+                "y": float(payload["y"]),
+            }
+            recipients = tuple(
+                other_client_id
+                for other_client_id in room.participants
+                if other_client_id != client_id
+            )
+            return CursorChange(cursor, recipients)
 
     def _remove_participant(self, client_id: str) -> RoomChange | None:
         code = self._client_rooms.pop(client_id, None)
@@ -202,3 +264,17 @@ class SessionManager:
             )
             if code not in self._rooms:
                 return code
+
+    @staticmethod
+    def _next_cursor_color(room: Room) -> str:
+        used = {participant.cursor_color for participant in room.participants.values()}
+        for color in CURSOR_COLORS:
+            if color not in used:
+                return color
+        hue = (len(room.participants) * 0.61803398875) % 1.0
+        while True:
+            red, green, blue = colorsys.hsv_to_rgb(hue, 0.72, 0.9)
+            color = f"#{round(red * 255):02x}{round(green * 255):02x}{round(blue * 255):02x}"
+            if color not in used:
+                return color
+            hue = (hue + 0.61803398875) % 1.0

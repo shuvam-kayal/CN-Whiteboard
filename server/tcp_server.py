@@ -177,6 +177,16 @@ class TCPServer:
                             None,
                             change.operation,
                         )
+            elif message_type == "cursor_update":
+                with self._room_events_lock:
+                    change = self.sessions.update_cursor(client_id, payload)
+                    for recipient_id in change.recipients:
+                        self._send_message(
+                            recipient_id,
+                            "cursor_update",
+                            None,
+                            change.cursor,
+                        )
             else:
                 self._send_message(client_id, message_type, request_id, payload)
         except SessionError as exc:

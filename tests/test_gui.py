@@ -8,9 +8,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtWidgets import QApplication
 from PySide6.QtTest import QTest
+from PySide6.QtTest import QSignalSpy
 from PySide6.QtCore import Qt
 
 from client.main_window import MainWindow
+from client.whiteboard_page import WhiteboardPage
 from server.tcp_server import TCPServer
 from shared.protocol import MessageBuffer, encode_message
 
@@ -116,3 +118,56 @@ def test_toolbar_controls_set_pen_color_size_tool_and_clear(app) -> None:
     QTest.mouseClick(board.clear_button, Qt.MouseButton.LeftButton)
     assert board.canvas.engine.operations == []
     window.close()
+
+
+def test_participant_notifications_and_cursor_update_throttling(app) -> None:
+    board = WhiteboardPage()
+    board.set_room("Alice", "ROOM42", True, "127.0.0.1", 5000, "alice-id")
+    participants = [
+        {
+            "participant_id": "alice-id",
+            "username": "Alice",
+            "is_host": True,
+            "cursor_color": "#e4572e",
+        }
+    ]
+    board.update_participants(participants)
+    assert board.participant_list.count() == 1
+    assert not board.participant_activity.isVisible()
+
+    joined = participants + [
+        {
+            "participant_id": "bob-id",
+            "username": "Bob",
+            "is_host": False,
+            "cursor_color": "#3478f6",
+        }
+    ]
+    board.update_participants(joined)
+    assert board.participant_list.count() == 2
+    assert board.participant_activity.text() == "Bob joined"
+
+    board.update_participants(participants)
+    assert board.participant_activity.text() == "Bob left"
+    assert "bob-id" not in board.canvas.remote_cursors
+
+    updates = QSignalSpy(board.cursor_position_changed)
+    for index in range(20):
+        board.canvas.cursor_moved.emit(index / 20, 0.5)
+    QTest.qWait(80)
+    app.processEvents()
+    assert updates.count() == 1
+    assert updates.at(0) == [19 / 20, 0.5]
+
+    board.canvas.set_remote_cursor(
+        {
+            "participant_id": "remote-id",
+            "username": "Remote",
+            "color": "#3478f6",
+            "x": 0.3,
+            "y": 0.6,
+        }
+    )
+    assert "remote-id" in board.canvas.remote_cursors
+    assert board.canvas.engine.operations == []
+    board.close()
