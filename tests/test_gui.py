@@ -142,6 +142,15 @@ def test_shape_selector_changes_drawing_tool(app) -> None:
     board.close()
 
 
+def test_room_code_is_prominent_and_copyable(app) -> None:
+    board = WhiteboardPage()
+    board.set_room("Alice", "ABCD23", True, "127.0.0.1", 5000, "alice-id")
+    QTest.mouseClick(board.copy_room_code_button, Qt.MouseButton.LeftButton)
+    assert QApplication.clipboard().text() == "ABCD23"
+    assert board.copy_room_code_button.text() == "Copied!"
+    board.close()
+
+
 def test_participant_notifications_and_cursor_update_throttling(app) -> None:
     board = WhiteboardPage()
     board.set_room("Alice", "ROOM42", True, "127.0.0.1", 5000, "alice-id")

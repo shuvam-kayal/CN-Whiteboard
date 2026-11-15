@@ -5,6 +5,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
+    QApplication,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -67,10 +68,15 @@ class WhiteboardPage(QWidget):
         title.setStyleSheet("font-size: 18px; font-weight: 750;")
         self.room_label = QLabel("Room · —")
         self.room_label.setObjectName("muted")
-        self.room_label.setStyleSheet("font-size: 12px;")
+        self.room_label.setStyleSheet("font-size: 15px; font-weight: 700; color: #3f47c2;")
         title_stack.addWidget(title)
         title_stack.addWidget(self.room_label)
         row.addLayout(title_stack)
+        self.copy_room_code_button = QPushButton("Copy code")
+        self.copy_room_code_button.setObjectName("copyRoomCodeButton")
+        self.copy_room_code_button.setToolTip("Copy this room code to share with other participants")
+        self.copy_room_code_button.clicked.connect(self._copy_room_code)
+        row.addWidget(self.copy_room_code_button)
         row.addStretch()
 
         self.connection_label = QLabel("Not connected")
@@ -304,7 +310,9 @@ class WhiteboardPage(QWidget):
     ) -> None:
         """Populate room identity and reset the local view for a new room."""
         role = "Host" if is_host else "Participant"
+        self.room_code = room_code
         self.room_label.setText(f"Room · {room_code}  /  {role}")
+        self.copy_room_code_button.setText("Copy code")
         self.connection_label.setText(f"Connected · {server_address}:{server_port}")
         self.username = username
         self.participant_id = participant_id
@@ -319,6 +327,13 @@ class WhiteboardPage(QWidget):
         self.chat_history.clear()
         self.chat_status.clear()
         self.persistence_status = ""
+
+    def _copy_room_code(self) -> None:
+        if not isinstance(getattr(self, "room_code", None), str):
+            return
+        QApplication.clipboard().setText(self.room_code)
+        self.copy_room_code_button.setText("Copied!")
+        QTimer.singleShot(1600, lambda: self.copy_room_code_button.setText("Copy code"))
 
     def update_participants(self, participants: list[dict]) -> None:
         current = {
