@@ -83,7 +83,8 @@ def test_persistence_manager_saves_validated_state_atomically(tmp_path) -> None:
     }
     saved = manager.save_board("ABCD23", [operation])
     loaded = manager.load_board("ABCD23")
-    assert saved.operations == loaded.operations == [operation]
+    normalized_operation = {**operation, "brush_type": "pen", "opacity": 1.0}
+    assert saved.operations == loaded.operations == [normalized_operation]
     assert (tmp_path / "ABCD23.json").exists()
     assert list(tmp_path.glob("*.tmp")) == []
 

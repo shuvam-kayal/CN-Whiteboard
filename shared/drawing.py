@@ -9,6 +9,7 @@ MAX_STROKE_POINTS = 20_000
 MAX_BRUSH_SIZE = 128.0
 MAX_COORDINATE = 10_000_000.0
 _HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
+_BRUSH_TYPES = {"pen", "pencil", "marker", "highlighter"}
 
 
 class DrawingDataError(ValueError):
@@ -20,8 +21,9 @@ def validate_drawing_operation(
 ) -> dict[str, Any]:
     """Validate one stroke or two-point shape operation received over the wire."""
     required = {"operation_type", "points", "color", "brush_size"}
-    allowed = required | ({"sequence_number"} if allow_sequence_number else set())
-    if not isinstance(payload, dict) or set(payload) != allowed:
+    allowed = required | {"brush_type", "opacity"} | ({"sequence_number"} if allow_sequence_number else set())
+    legacy_allowed = required | ({"sequence_number"} if allow_sequence_number else set())
+    if not isinstance(payload, dict) or set(payload) not in (allowed, legacy_allowed):
         raise DrawingDataError("drawing operation has missing or unexpected fields")
 
     operation_type = payload["operation_type"]
@@ -39,6 +41,18 @@ def validate_drawing_operation(
         or not math.isfinite(brush_size)
     ):
         raise DrawingDataError(f"brush_size must be greater than 0 and at most {MAX_BRUSH_SIZE:g}")
+
+    brush_type = payload.get("brush_type", "pen")
+    if not isinstance(brush_type, str) or brush_type not in _BRUSH_TYPES:
+        raise DrawingDataError("brush_type is not a supported brush")
+    opacity = payload.get("opacity", 1.0)
+    if (
+        isinstance(opacity, bool)
+        or not isinstance(opacity, (int, float))
+        or not math.isfinite(opacity)
+        or not 0 < opacity <= 1
+    ):
+        raise DrawingDataError("opacity must be greater than 0 and at most 1")
 
     points = payload["points"]
     if not isinstance(points, list) or not points:
@@ -69,6 +83,8 @@ def validate_drawing_operation(
         "points": clean_points,
         "color": color,
         "brush_size": brush_size,
+        "brush_type": brush_type,
+        "opacity": float(opacity),
     }
     if allow_sequence_number:
         sequence = payload["sequence_number"]

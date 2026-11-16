@@ -20,10 +20,14 @@ class DrawingOperation:
     sequence_number: int | None = None
     operation_id: str | None = None
     active: bool = True
+    brush_type: str = "pen"
+    opacity: float = 1.0
 
     def __post_init__(self) -> None:
         if self.operation_type not in {"pen", "eraser", "line", "rectangle", "ellipse"}:
             raise ValueError("operation_type is not a supported drawing tool")
+        if self.brush_type not in {"pen", "pencil", "marker", "highlighter"}:
+            raise ValueError("brush_type is not a supported brush")
         if not isinstance(self.color, str) or not self.color:
             raise ValueError("color must be a non-empty string")
         if not isinstance(self.brush_size, (int, float)) or not math.isfinite(
@@ -31,6 +35,14 @@ class DrawingOperation:
         ) or self.brush_size <= 0:
             raise ValueError("brush_size must be a positive finite number")
         self.brush_size = float(self.brush_size)
+        if (
+            isinstance(self.opacity, bool)
+            or not isinstance(self.opacity, (int, float))
+            or not math.isfinite(self.opacity)
+            or not 0 < self.opacity <= 1
+        ):
+            raise ValueError("opacity must be greater than 0 and at most 1")
+        self.opacity = float(self.opacity)
         if not isinstance(self.active, bool):
             raise ValueError("active status must be a boolean")
         self.points = [self._point(point) for point in self.points]
@@ -46,6 +58,8 @@ class DrawingOperation:
             "points": [[x, y] for x, y in self.points],
             "color": self.color,
             "brush_size": self.brush_size,
+            "brush_type": self.brush_type,
+            "opacity": self.opacity,
         }
 
     @staticmethod
@@ -76,6 +90,8 @@ class DrawingEngine:
         color: str,
         brush_size: float,
         operation_type: str = "pen",
+        brush_type: str = "pen",
+        opacity: float = 1.0,
     ) -> None:
         if self._current is not None:
             raise RuntimeError("a stroke is already in progress")
@@ -84,6 +100,8 @@ class DrawingEngine:
             [DrawingOperation._point(point)] * (2 if operation_type in {"line", "rectangle", "ellipse"} else 1),
             color,
             brush_size,
+            brush_type=brush_type,
+            opacity=opacity,
         )
 
     def add_point(self, point: Point) -> None:
@@ -116,9 +134,13 @@ class DrawingEngine:
         if not isinstance(payload, dict):
             raise ValueError("drawing operation must be an object")
         fields = ("operation_type", "points", "color", "brush_size", "sequence_number")
+        data_payload = {field: payload.get(field) for field in fields}
+        if "brush_type" in payload or "opacity" in payload:
+            data_payload["brush_type"] = payload.get("brush_type")
+            data_payload["opacity"] = payload.get("opacity")
         try:
             data = validate_drawing_operation(
-                {field: payload.get(field) for field in fields},
+                data_payload,
                 allow_sequence_number=True,
             )
         except DrawingDataError as exc:
@@ -139,6 +161,8 @@ class DrawingEngine:
                 data["brush_size"],
                 sequence_number=sequence,
                 active=active,
+                brush_type=data["brush_type"],
+                opacity=data["opacity"],
             )
         )
         self._sort_confirmed_operations()

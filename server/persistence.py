@@ -21,6 +21,8 @@ _OPERATION_FIELDS = {
     "points",
     "color",
     "brush_size",
+    "brush_type",
+    "opacity",
     "sequence_number",
     "participant_id",
     "room_code",
@@ -262,11 +264,13 @@ class PersistenceManager:
 
         checked: list[dict[str, Any]] = []
         for expected_sequence, operation in enumerate(operations, start=1):
-            legacy_fields = _OPERATION_FIELDS - {"active"}
-            if not isinstance(operation, dict) or set(operation) not in (
+            accepted_fields = (
                 _OPERATION_FIELDS,
-                legacy_fields,
-            ):
+                _OPERATION_FIELDS - {"active"},
+                _OPERATION_FIELDS - {"brush_type", "opacity"},
+                _OPERATION_FIELDS - {"active", "brush_type", "opacity"},
+            )
+            if not isinstance(operation, dict) or set(operation) not in accepted_fields:
                 raise PersistenceError("invalid_board", "saved drawing operation has an invalid structure")
             if operation.get("room_code") != room_code:
                 raise PersistenceError("invalid_board", "drawing operation belongs to another room")
@@ -275,15 +279,19 @@ class PersistenceManager:
             active = operation.get("active", True)
             if not isinstance(active, bool):
                 raise PersistenceError("invalid_board", "drawing operation status is invalid")
+            drawing_payload = {
+                "operation_type": operation["operation_type"],
+                "points": operation["points"],
+                "color": operation["color"],
+                "brush_size": operation["brush_size"],
+                "sequence_number": operation["sequence_number"],
+            }
+            if "brush_type" in operation or "opacity" in operation:
+                drawing_payload["brush_type"] = operation.get("brush_type")
+                drawing_payload["opacity"] = operation.get("opacity")
             try:
                 drawing = validate_drawing_operation(
-                    {
-                        "operation_type": operation["operation_type"],
-                        "points": operation["points"],
-                        "color": operation["color"],
-                        "brush_size": operation["brush_size"],
-                        "sequence_number": operation["sequence_number"],
-                    },
+                    drawing_payload,
                     allow_sequence_number=True,
                 )
             except DrawingDataError as exc:

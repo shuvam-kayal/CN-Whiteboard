@@ -5,6 +5,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
+    QColorDialog,
     QApplication,
     QFileDialog,
     QFrame,
@@ -91,7 +92,9 @@ class WhiteboardPage(QWidget):
     def _toolbar(self) -> QFrame:
         frame = QFrame()
         frame.setObjectName("toolbar")
-        row = QHBoxLayout(frame)
+        layout = QVBoxLayout(frame)
+        layout.setSpacing(8)
+        row = QHBoxLayout()
         row.setContentsMargins(12, 9, 12, 9)
         row.setSpacing(8)
         label = QLabel("TOOLS")
@@ -125,6 +128,13 @@ class WhiteboardPage(QWidget):
         self.shape_combo.currentIndexChanged.connect(self._choose_shape)
         row.addWidget(self.shape_combo)
 
+        self.brush_combo = QComboBox()
+        self.brush_combo.setObjectName("brushTypeCombo")
+        for label, brush in (("Pen", "pen"), ("Pencil", "pencil"), ("Marker", "marker"), ("Highlighter", "highlighter")):
+            self.brush_combo.addItem(label, brush)
+        self.brush_combo.currentIndexChanged.connect(self._choose_brush)
+        row.addWidget(self.brush_combo)
+
         color_label = QLabel("Color")
         color_label.setObjectName("muted")
         row.addWidget(color_label)
@@ -137,47 +147,73 @@ class WhiteboardPage(QWidget):
             ("Green", "#279777"),
             ("Violet", "#8858c8"),
             ("Orange", "#dd812f"),
+            ("Black", "#000000"),
+            ("White", "#ffffff"),
+            ("Red", "#e53935"),
+            ("Yellow", "#fdd835"),
+            ("Purple", "#8e24aa"),
+            ("Pink", "#ec407a"),
+            ("Cyan", "#00acc1"),
+            ("Brown", "#795548"),
+            ("Gray", "#757575"),
         ):
             self.color_combo.addItem(name, color)
         self.color_combo.currentIndexChanged.connect(self._choose_color)
         row.addWidget(self.color_combo)
+        self.color_swatch = QLabel("●")
+        self.color_swatch.setObjectName("selectedColorSwatch")
+        self.color_swatch.setToolTip("Currently selected drawing colour")
+        self.color_swatch.setStyleSheet(
+            f"color: {self.canvas.pen_color}; font-size: 22px;"
+        )
+        row.addWidget(self.color_swatch)
+        self.custom_color_button = QPushButton("Custom…")
+        self.custom_color_button.setObjectName("customColorButton")
+        self.custom_color_button.clicked.connect(self._pick_custom_color)
+        row.addWidget(self.custom_color_button)
 
         size_label = QLabel("Size")
         size_label.setObjectName("muted")
         row.addWidget(size_label)
         self.size_combo = QComboBox()
         self.size_combo.setObjectName("brushSizeCombo")
-        for size in (2, 4, 6, 10, 14, 20):
+        for size in (2, 4, 6, 10, 14, 20, 28, 36, 48, 64, 96, 128):
             self.size_combo.addItem(f"{size} px", size)
         self.size_combo.setCurrentIndex(1)
         self.size_combo.currentIndexChanged.connect(self._choose_size)
         row.addWidget(self.size_combo)
+        row.addStretch()
+        layout.addLayout(row)
+
+        actions = QHBoxLayout()
+        actions.setContentsMargins(12, 0, 12, 9)
+        actions.addStretch()
 
         self.clear_button = QPushButton("Clear canvas")
         self.clear_button.setObjectName("clearCanvasButton")
         self.clear_button.clicked.connect(self.canvas.clear)
-        row.addWidget(self.clear_button)
+        actions.addWidget(self.clear_button)
         self.save_board_button = QPushButton("Save board")
         self.save_board_button.setObjectName("saveBoardButton")
         self.save_board_button.clicked.connect(self.save_board_requested.emit)
         self.load_board_button = QPushButton("Load board")
         self.load_board_button.setObjectName("loadBoardButton")
         self.load_board_button.clicked.connect(self.load_board_requested.emit)
-        row.addWidget(self.save_board_button)
-        row.addWidget(self.load_board_button)
+        actions.addWidget(self.save_board_button)
+        actions.addWidget(self.load_board_button)
         self.undo_button = QPushButton("Undo")
         self.undo_button.setObjectName("undoButton")
         self.undo_button.clicked.connect(self.undo_requested.emit)
         self.redo_button = QPushButton("Redo")
         self.redo_button.setObjectName("redoButton")
         self.redo_button.clicked.connect(self.redo_requested.emit)
-        row.addWidget(self.undo_button)
-        row.addWidget(self.redo_button)
+        actions.addWidget(self.undo_button)
+        actions.addWidget(self.redo_button)
         self.export_button = QPushButton("Export PNG")
         self.export_button.setObjectName("exportPngButton")
         self.export_button.clicked.connect(self._export_png)
-        row.addWidget(self.export_button)
-        row.addStretch()
+        actions.addWidget(self.export_button)
+        layout.addLayout(actions)
         return frame
 
     def _choose_shape(self, index: int) -> None:
@@ -207,7 +243,33 @@ class WhiteboardPage(QWidget):
     def _choose_color(self, index: int) -> None:
         color = self.color_combo.itemData(index)
         if color:
-            self.canvas.set_pen_color(color)
+            self.set_selected_color(color)
+
+    def set_selected_color(self, color: str) -> None:
+        """Set a valid custom or preset color and keep the toolbar indicator current."""
+        parsed = QColor(color)
+        if not parsed.isValid():
+            raise ValueError("color must be a valid Qt color")
+        normalized = parsed.name(QColor.NameFormat.HexRgb)
+        self.canvas.set_pen_color(normalized)
+        self.color_swatch.setStyleSheet(f"color: {normalized}; font-size: 22px;")
+        self.color_swatch.setText("●")
+        match = self.color_combo.findData(normalized)
+        if match >= 0 and self.color_combo.currentIndex() != match:
+            self.color_combo.setCurrentIndex(match)
+        elif match < 0:
+            self.color_combo.setCurrentIndex(-1)
+            self.color_combo.setToolTip(f"Custom colour {normalized}")
+
+    def _pick_custom_color(self) -> None:
+        color = QColorDialog.getColor(QColor(self.canvas.pen_color), self, "Choose drawing colour")
+        if color.isValid():
+            self.set_selected_color(color.name(QColor.NameFormat.HexRgb))
+
+    def _choose_brush(self, index: int) -> None:
+        brush = self.brush_combo.itemData(index)
+        if brush:
+            self.canvas.set_brush_type(brush)
 
     def _choose_size(self, index: int) -> None:
         size = self.size_combo.itemData(index)

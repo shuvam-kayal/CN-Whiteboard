@@ -28,6 +28,8 @@ class DrawingCanvas(QWidget):
         self.tool = "pen"
         self.pen_color = "#202943"
         self.brush_size = 4.0
+        self.brush_type = "pen"
+        self.brush_opacity = 1.0
 
     def set_tool(self, tool: str) -> None:
         if tool not in {"pen", "eraser", "line", "rectangle", "ellipse"}:
@@ -46,6 +48,13 @@ class DrawingCanvas(QWidget):
                 f"brush size must be positive and at most {MAX_BRUSH_SIZE:g}"
             )
         self.brush_size = float(size)
+
+    def set_brush_type(self, brush_type: str) -> None:
+        settings = {"pen": 1.0, "pencil": 0.62, "marker": 0.72, "highlighter": 0.28}
+        if brush_type not in settings:
+            raise ValueError("brush type is not supported")
+        self.brush_type = brush_type
+        self.brush_opacity = settings[brush_type]
 
     def clear(self) -> None:
         self.engine.clear()
@@ -133,6 +142,8 @@ class DrawingCanvas(QWidget):
                 "#ffffff" if operation_type == "eraser" else self.pen_color,
                 self.brush_size,
                 operation_type,
+                "pen" if operation_type == "eraser" else self.brush_type,
+                1.0 if operation_type == "eraser" else self.brush_opacity,
             )
             self.update()
             event.accept()
@@ -194,9 +205,14 @@ class DrawingCanvas(QWidget):
     def _render_operation(painter: QPainter, operation: DrawingOperation) -> None:
         if not operation.points:
             return
+        painter.save()
+        painter.setOpacity(operation.opacity)
+        brush_scale = {"pen": 1.0, "pencil": 0.72, "marker": 1.45, "highlighter": 2.4}.get(
+            operation.brush_type, 1.0
+        )
         pen = QPen(
             QColor(operation.color),
-            operation.brush_size,
+            max(1.0, operation.brush_size * brush_scale),
             Qt.PenStyle.SolidLine,
             Qt.PenCapStyle.RoundCap,
             Qt.PenJoinStyle.RoundJoin,
@@ -206,6 +222,7 @@ class DrawingCanvas(QWidget):
             painter.drawLine(
                 QPointF(*operation.points[0]), QPointF(*operation.points[1])
             )
+            painter.restore()
             return
         if operation.operation_type in {"rectangle", "ellipse"}:
             start, end = operation.points
@@ -214,13 +231,16 @@ class DrawingCanvas(QWidget):
                 painter.drawRect(bounds)
             else:
                 painter.drawEllipse(bounds)
+            painter.restore()
             return
         if len(operation.points) == 1:
             x, y = operation.points[0]
             painter.drawPoint(round(x), round(y))
+            painter.restore()
             return
         for start, end in zip(operation.points, operation.points[1:]):
             painter.drawLine(round(start[0]), round(start[1]), round(end[0]), round(end[1]))
+        painter.restore()
 
     def _render_cursor(self, painter: QPainter, cursor: dict) -> None:
         x = cursor["x"] * max(1, self.width() - 1)
