@@ -1,6 +1,7 @@
 """Slice 13 brush validation, rendering, GUI, and wire-format coverage."""
 
 import os
+import math
 import socket
 import threading
 
@@ -83,8 +84,12 @@ def test_brush_operations_capture_render_properties_and_export(app, tmp_path, br
     target = tmp_path / f"{brush}.png"
     assert canvas.export_png(str(target))
     image = QImage(str(target))
-    assert image.size().width() == 160 and image.size().height() == 100
-    assert image.pixelColor(70, 50) != QColor("white")
+    bounds = canvas.engine.operations_bounds(canvas.engine.operations)
+    left, top = math.floor(bounds[0] - 24), math.floor(bounds[1] - 24)
+    right, bottom = math.ceil(bounds[2] + 24), math.ceil(bounds[3] + 24)
+    assert image.size().width() == right - left + 1
+    assert image.size().height() == bottom - top + 1
+    assert image.pixelColor(70 - left, 50 - top) != QColor("white")
     assert operation.to_payload()["brush_type"] == brush
     canvas.close()
 

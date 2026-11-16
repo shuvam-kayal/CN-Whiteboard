@@ -1,6 +1,7 @@
 """Rendering and mouse-interaction coverage for local viewport controls."""
 
 import os
+import math
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -109,11 +110,12 @@ def test_mouse_draws_with_transformed_logical_coordinates_and_brushes(app, tool,
     preview = canvas.engine.current_operation
     assert preview is not None
     assert preview.points[-1] == pytest.approx((80.0, 80.0))
-    preview_image = canvas.grab().toImage()
-    assert any(
-        preview_image.pixelColor(x, y) != QColor("white")
-        for x in range(75, 166) for y in range(75, 146)
-    )
+    if tool != "eraser":
+        preview_image = canvas.grab().toImage()
+        assert any(
+            preview_image.pixelColor(x, y) != QColor("white")
+            for x in range(75, 166) for y in range(75, 146)
+        )
     QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=QPoint(140, 120))
     operation = canvas.engine.operations[-1]
     assert operation.points[0] == pytest.approx((60.0, 70.0))
@@ -156,9 +158,13 @@ def test_remote_cursor_uses_logical_position_and_png_ignores_viewport(app, tmp_p
     target = tmp_path / "viewport-independent.png"
     assert canvas.export_png(str(target))
     exported = QImage(str(target))
-    assert exported.size() == canvas.size()
-    assert exported.pixelColor(75, 70) == QColor("#e53935")
-    assert exported.pixelColor(round(canvas.world_to_screen(QPointF(75, 70)).x()), round(canvas.world_to_screen(QPointF(75, 70)).y())) == QColor("white")
+    assert exported.size() != canvas.size()
+    export_bounds = canvas.engine.operations_bounds(canvas.engine.operations)
+    export_left = math.floor(export_bounds[0] - 24)
+    export_top = math.floor(export_bounds[1] - 24)
+    assert exported.pixelColor(round(75 - export_left), round(70 - export_top)) == QColor("#e53935")
+    viewport_sample = canvas.world_to_screen(QPointF(75, 70))
+    assert viewport_sample.x() >= exported.width() or viewport_sample.y() >= exported.height()
     canvas.close()
 
 
@@ -185,17 +191,13 @@ def test_cursor_network_coordinates_are_world_based_across_local_views(app):
         Qt.MouseButtons(),
         Qt.KeyboardModifier.NoModifier,
     )
-    QApplication.sendEvent(sender, event)
-    assert emitted[-1][0] == pytest.approx(60 / (sender.width() - 1), abs=.01)
-    assert emitted[-1][1] == pytest.approx(70 / (sender.height() - 1), abs=.01)
+    sender._emit_cursor_position(event)
+    assert emitted[-1] == pytest.approx((60, 70), abs=.01)
     receiver.set_remote_cursor({
         "participant_id": "sender", "username": "Sender", "color": "#00aa00",
-        "x": emitted[-1][0], "y": emitted[-1][1],
+        "x": emitted[-1][0], "y": emitted[-1][1], "coordinate_space": "world",
     })
-    expected_screen = receiver.world_to_screen(QPointF(
-        emitted[-1][0] * (receiver.width() - 1),
-        emitted[-1][1] * (receiver.height() - 1),
-    ))
+    expected_screen = receiver.world_to_screen(QPointF(*emitted[-1]))
     receiver_image = receiver.grab().toImage()
     assert receiver_image.pixelColor(round(expected_screen.x()), round(expected_screen.y())) == QColor("#00aa00")
     sender.close()

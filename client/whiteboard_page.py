@@ -254,10 +254,16 @@ class WhiteboardPage(QWidget):
             return
         if not path.lower().endswith(".png"):
             path += ".png"
-        if self.canvas.export_png(path):
+        try:
+            exported = self.canvas.export_png(path)
+        except (ValueError, MemoryError) as exc:
+            self.connection_label.setText(f"PNG export failed · {exc}")
+            self.connection_label.setStyleSheet("color: #b53c4b;")
+            return
+        if exported:
             self.connection_label.setText(f"Exported · {path}")
         else:
-            self.connection_label.setText("PNG export failed")
+            self.connection_label.setText("PNG export failed · could not write file")
             self.connection_label.setStyleSheet("color: #b53c4b;")
 
     def _choose_color(self, index: int) -> None:

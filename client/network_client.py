@@ -67,7 +67,9 @@ class NetworkClient(QObject):
         return self.send_message("drawing_operation", payload, operation_id)
 
     def send_cursor_position(self, x: float, y: float) -> bool:
-        return self.send_message("cursor_update", {"x": x, "y": y})
+        return self.send_message(
+            "cursor_update", {"x": x, "y": y, "coordinate_space": "world"}
+        )
 
     def send_chat_message(self, text: str) -> bool:
         return self.send_message(

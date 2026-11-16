@@ -8,7 +8,13 @@ from PySide6.QtGui import QColor, QFontMetrics, QImage, QPainter, QPen, QTransfo
 from PySide6.QtWidgets import QWidget
 
 from client.drawing_engine import DrawingEngine, DrawingOperation
-from shared.drawing import MAX_BRUSH_SIZE
+from shared.drawing import MAX_BRUSH_SIZE, MAX_COORDINATE
+
+
+EMPTY_EXPORT_SIZE = (1024, 768)
+EXPORT_MARGIN = 24.0
+MAX_EXPORT_DIMENSION = 16_384
+MAX_EXPORT_PIXELS = 16_000_000
 
 
 class DrawingCanvas(QWidget):
@@ -125,16 +131,40 @@ class DrawingCanvas(QWidget):
         return changed
 
     def export_png(self, path: str) -> bool:
-        """Write only the completed whiteboard at the widget's current dimensions."""
+        """Export all active world-space drawing with a bounded safety margin."""
         if not path:
             return False
-        image = QImage(self.size(), QImage.Format.Format_ARGB32)
+        operations = [operation for operation in self.engine.operations if operation.active]
+        bounds = self.engine.operations_bounds(operations)
+        if bounds is None:
+            width, height = EMPTY_EXPORT_SIZE
+            left = top = 0
+        else:
+            left = math.floor(bounds[0] - EXPORT_MARGIN)
+            top = math.floor(bounds[1] - EXPORT_MARGIN)
+            right = math.ceil(bounds[2] + EXPORT_MARGIN)
+            bottom = math.ceil(bounds[3] + EXPORT_MARGIN)
+            width, height = right - left + 1, bottom - top + 1
+        if (
+            width < 1 or height < 1
+            or width > MAX_EXPORT_DIMENSION
+            or height > MAX_EXPORT_DIMENSION
+            or width * height > MAX_EXPORT_PIXELS
+        ):
+            raise ValueError(
+                f"PNG export is too large ({width:,} × {height:,}); "
+                f"maximum is {MAX_EXPORT_DIMENSION:,} per side and "
+                f"{MAX_EXPORT_PIXELS:,} pixels"
+            )
+        image = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
+        if image.isNull():
+            raise ValueError("PNG export could not allocate the required image")
         image.fill(QColor("white"))
         painter = QPainter(image)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        for operation in self.engine.operations:
-            if operation.active:
-                self._render_operation(painter, operation)
+        painter.setWorldTransform(QTransform(1, 0, 0, 1, -left, -top))
+        for operation in operations:
+            self._render_operation(painter, operation)
         painter.end()
         return image.save(path, "PNG")
 
@@ -158,17 +188,23 @@ class DrawingCanvas(QWidget):
             or not isinstance(x, (int, float))
             or isinstance(y, bool)
             or not isinstance(y, (int, float))
+            or abs(x) > MAX_COORDINATE
+            or abs(y) > MAX_COORDINATE
             or not math.isfinite(x)
             or not math.isfinite(y)
-            or not 0 <= x <= 1
-            or not 0 <= y <= 1
         ):
+            return
+        coordinate_space = cursor.get("coordinate_space", "normalized")
+        if coordinate_space not in {"normalized", "world"}:
+            return
+        if coordinate_space == "normalized" and not (0 <= x <= 1 and 0 <= y <= 1):
             return
         self.remote_cursors[participant_id] = {
             "username": username,
             "color": color,
             "x": float(x),
             "y": float(y),
+            "coordinate_space": coordinate_space,
         }
         self.update()
 
@@ -248,6 +284,14 @@ class DrawingCanvas(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), QColor("white"))
+        top_left = self.screen_to_world(QPointF(0, 0))
+        bottom_right = self.screen_to_world(QPointF(self.width(), self.height()))
+        view_bounds = (
+            min(top_left.x(), bottom_right.x()) - 2,
+            min(top_left.y(), bottom_right.y()) - 2,
+            max(top_left.x(), bottom_right.x()) + 2,
+            max(top_left.y(), bottom_right.y()) + 2,
+        )
         painter.save()
         painter.setWorldTransform(
             QTransform(
@@ -255,7 +299,8 @@ class DrawingCanvas(QWidget):
                 -self.pan_x * self.zoom, -self.pan_y * self.zoom,
             )
         )
-        for operation in self.engine.operations:
+        self._render_workspace_grid(painter, view_bounds)
+        for operation in self.engine.visible_operations(view_bounds):
             if operation.active:
                 self._render_operation(painter, operation)
         if self.engine.current_operation is not None:
@@ -264,6 +309,26 @@ class DrawingCanvas(QWidget):
         for cursor in self.remote_cursors.values():
             self._render_cursor(painter, cursor)
         painter.end()
+
+    def _render_workspace_grid(
+        self, painter: QPainter, bounds: tuple[float, float, float, float]
+    ) -> None:
+        """Draw a subtle repeating grid in the visible world region only."""
+        left, top, right, bottom = bounds
+        spacing = 100.0
+        while spacing * self.zoom < 28:
+            spacing *= 2
+        painter.save()
+        painter.setPen(QPen(QColor("#eef1f6"), 0))
+        x = math.floor(left / spacing) * spacing
+        while x <= right:
+            painter.drawLine(QPointF(x, top), QPointF(x, bottom))
+            x += spacing
+        y = math.floor(top / spacing) * spacing
+        while y <= bottom:
+            painter.drawLine(QPointF(left, y), QPointF(right, y))
+            y += spacing
+        painter.restore()
 
     @staticmethod
     def _event_point(event) -> tuple[float, float]:
@@ -277,8 +342,8 @@ class DrawingCanvas(QWidget):
     def _emit_cursor_position(self, event) -> None:
         x, y = self._event_world_point(event)
         self.cursor_moved.emit(
-            min(1.0, max(0.0, x / max(1, self.width() - 1))),
-            min(1.0, max(0.0, y / max(1, self.height() - 1))),
+            min(MAX_COORDINATE, max(-MAX_COORDINATE, x)),
+            min(MAX_COORDINATE, max(-MAX_COORDINATE, y)),
         )
 
     @staticmethod
@@ -323,10 +388,12 @@ class DrawingCanvas(QWidget):
         painter.restore()
 
     def _render_cursor(self, painter: QPainter, cursor: dict) -> None:
-        world_position = QPointF(
-            cursor["x"] * max(1, self.width() - 1),
-            cursor["y"] * max(1, self.height() - 1),
-        )
+        world_position = QPointF(cursor["x"], cursor["y"])
+        if cursor.get("coordinate_space") != "world":
+            world_position = QPointF(
+                cursor["x"] * max(1, self.width() - 1),
+                cursor["y"] * max(1, self.height() - 1),
+            )
         screen_position = self.world_to_screen(world_position)
         x, y = screen_position.x(), screen_position.y()
         color = QColor(cursor["color"])

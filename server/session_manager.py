@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 
-from shared.drawing import DrawingDataError, validate_drawing_operation
+from shared.drawing import MAX_COORDINATE, DrawingDataError, validate_drawing_operation
 from shared.protocol import MAX_MESSAGE_SIZE, ProtocolError, encode_message
 from server.persistence import PersistenceError, PersistenceManager
 
@@ -433,23 +433,30 @@ class SessionManager:
             ]
 
     def update_cursor(self, client_id: str, payload: object) -> CursorChange:
-        """Validate a room member's normalized cursor position and route it."""
+        """Validate a room member's cursor and route legacy-normalized or world coordinates."""
         with self._lock:
             room_code = self._client_rooms.get(client_id)
             if room_code is None:
                 raise SessionError("not_in_room", "client must join a room before moving its cursor")
-            if not isinstance(payload, dict) or set(payload) != {"x", "y"}:
-                raise SessionError("invalid_cursor", "cursor payload must contain only x and y")
+            if not isinstance(payload, dict):
+                raise SessionError("invalid_cursor", "cursor payload must be an object")
+            coordinate_space = payload.get("coordinate_space", "normalized")
+            allowed = {"x", "y"} if coordinate_space == "normalized" else {
+                "x", "y", "coordinate_space"
+            }
+            if set(payload) != allowed or coordinate_space not in {"normalized", "world"}:
+                raise SessionError("invalid_cursor", "cursor payload fields are invalid")
 
             coordinates = (payload["x"], payload["y"])
             if any(
                 isinstance(value, bool)
                 or not isinstance(value, (int, float))
-                or not 0 <= value <= 1
+                or (coordinate_space == "normalized" and not 0 <= value <= 1)
+                or (coordinate_space == "world" and abs(value) > MAX_COORDINATE)
                 or not math.isfinite(value)
                 for value in coordinates
             ):
-                raise SessionError("invalid_cursor", "cursor coordinates must be between 0 and 1")
+                raise SessionError("invalid_cursor", "cursor coordinates are outside the allowed range")
 
             room = self._rooms[room_code]
             participant = room.participants[client_id]
@@ -461,6 +468,8 @@ class SessionManager:
                 "x": float(payload["x"]),
                 "y": float(payload["y"]),
             }
+            if coordinate_space == "world":
+                cursor["coordinate_space"] = "world"
             recipients = tuple(
                 other_client_id
                 for other_client_id in room.participants

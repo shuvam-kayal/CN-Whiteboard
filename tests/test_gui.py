@@ -97,7 +97,7 @@ def test_join_room_uses_entered_room_and_connection_settings(app, server) -> Non
     assert f"{server.server_address[0]}:{server.server_address[1]}" in (
         window.whiteboard_page.connection_label.text()
     )
-    assert window.whiteboard_page.participant_list.count() == 2
+    wait_until(app, lambda: window.whiteboard_page.participant_list.count() == 2)
     window.close()
     host.close()
 

@@ -7,6 +7,11 @@ from shared.drawing import DrawingDataError, validate_drawing_operation
 
 
 Point = tuple[float, float]
+Bounds = tuple[float, float, float, float]
+SPATIAL_CELL_SIZE = 512.0
+MAX_SPATIAL_CELLS_PER_OPERATION = 128
+MAX_SPATIAL_CELLS_PER_QUERY = 10_000
+_BRUSH_SCALE = {"pen": 1.0, "pencil": 0.72, "marker": 1.45, "highlighter": 2.4}
 
 
 @dataclass
@@ -79,6 +84,11 @@ class DrawingEngine:
         self.operations: list[DrawingOperation] = []
         self._current: DrawingOperation | None = None
         self._remote_sequences: set[int] = set()
+        self._spatial_cells: dict[tuple[int, int], set[int]] = {}
+        self._spatial_bounds: dict[int, Bounds] = {}
+        self._spatial_operations: dict[int, DrawingOperation] = {}
+        self._spatial_large: set[int] = set()
+        self._render_positions: dict[int, int] = {}
 
     @property
     def current_operation(self) -> DrawingOperation | None:
@@ -126,6 +136,7 @@ class DrawingEngine:
                 self.add_point(point)
         operation = self._current
         self.operations.append(operation)
+        self._index_operation(operation)
         self._current = None
         return operation
 
@@ -153,8 +164,9 @@ class DrawingEngine:
         if sequence in self._remote_sequences:
             return False
         self._remote_sequences.add(sequence)
+        previous = self.operations[-1] if self.operations else None
         self.operations.append(
-            DrawingOperation(
+            (operation := DrawingOperation(
                 data["operation_type"],
                 [(point[0], point[1]) for point in data["points"]],
                 data["color"],
@@ -163,9 +175,13 @@ class DrawingEngine:
                 active=active,
                 brush_type=data["brush_type"],
                 opacity=data["opacity"],
-            )
+            ))
         )
-        self._sort_confirmed_operations()
+        self._index_operation(operation)
+        if previous is not None and (
+            previous.sequence_number is None or previous.sequence_number >= sequence
+        ):
+            self._sort_confirmed_operations()
         return True
 
     def set_operation_active(self, sequence_number: int, active: bool) -> bool:
@@ -209,6 +225,11 @@ class DrawingEngine:
             raise ValueError("board state operation sequence is incomplete")
         self.operations = replacement.operations
         self._remote_sequences = replacement._remote_sequences
+        self._spatial_cells = replacement._spatial_cells
+        self._spatial_bounds = replacement._spatial_bounds
+        self._spatial_operations = replacement._spatial_operations
+        self._spatial_large = replacement._spatial_large
+        self._render_positions = replacement._render_positions
         self._current = None
 
     def _sort_confirmed_operations(self) -> None:
@@ -218,8 +239,90 @@ class DrawingEngine:
                 operation.sequence_number or 0,
             )
         )
+        self._render_positions = {
+            id(operation): position for position, operation in enumerate(self.operations)
+        }
+
+    @staticmethod
+    def operation_bounds(operation: DrawingOperation) -> Bounds:
+        """Return world-space bounds including the brush's widest rendered edge."""
+        if not operation.points:
+            return 0.0, 0.0, 0.0, 0.0
+        scale = _BRUSH_SCALE.get(operation.brush_type, 1.0)
+        margin = operation.brush_size * scale / 2 + 2.0
+        xs = [point[0] for point in operation.points]
+        ys = [point[1] for point in operation.points]
+        return min(xs) - margin, min(ys) - margin, max(xs) + margin, max(ys) + margin
+
+    @classmethod
+    def operations_bounds(cls, operations: list[DrawingOperation]) -> Bounds | None:
+        """Union the visual bounds of a set of operations."""
+        if not operations:
+            return None
+        bounds = [cls.operation_bounds(operation) for operation in operations]
+        return (
+            min(item[0] for item in bounds),
+            min(item[1] for item in bounds),
+            max(item[2] for item in bounds),
+            max(item[3] for item in bounds),
+        )
+
+    def visible_operations(self, bounds: Bounds) -> list[DrawingOperation]:
+        """Return operations overlapping a world-space viewport in board order."""
+        left, top, right, bottom = bounds
+        min_x = math.floor(left / SPATIAL_CELL_SIZE)
+        max_x = math.floor(right / SPATIAL_CELL_SIZE)
+        min_y = math.floor(top / SPATIAL_CELL_SIZE)
+        max_y = math.floor(bottom / SPATIAL_CELL_SIZE)
+        cell_count = (max_x - min_x + 1) * (max_y - min_y + 1)
+        if cell_count > MAX_SPATIAL_CELLS_PER_QUERY:
+            candidates = set(self._spatial_operations)
+        else:
+            candidates = set(self._spatial_large)
+            for cell_x in range(min_x, max_x + 1):
+                for cell_y in range(min_y, max_y + 1):
+                    candidates.update(self._spatial_cells.get((cell_x, cell_y), ()))
+        visible = [
+            key for key in candidates
+            if key in self._spatial_bounds
+            and self._intersects(self._spatial_bounds[key], bounds)
+        ]
+        visible.sort(key=lambda key: self._render_positions.get(key, 0))
+        return [self._spatial_operations[key] for key in visible]
+
+    def _index_operation(self, operation: DrawingOperation) -> None:
+        key = id(operation)
+        bounds = self.operation_bounds(operation)
+        self._spatial_bounds[key] = bounds
+        self._spatial_operations[key] = operation
+        self._render_positions[key] = len(self.operations) - 1
+        min_x, min_y, max_x, max_y = (
+            math.floor(bounds[0] / SPATIAL_CELL_SIZE),
+            math.floor(bounds[1] / SPATIAL_CELL_SIZE),
+            math.floor(bounds[2] / SPATIAL_CELL_SIZE),
+            math.floor(bounds[3] / SPATIAL_CELL_SIZE),
+        )
+        cell_count = (max_x - min_x + 1) * (max_y - min_y + 1)
+        if cell_count > MAX_SPATIAL_CELLS_PER_OPERATION:
+            self._spatial_large.add(key)
+            return
+        for cell_x in range(min_x, max_x + 1):
+            for cell_y in range(min_y, max_y + 1):
+                self._spatial_cells.setdefault((cell_x, cell_y), set()).add(key)
+
+    @staticmethod
+    def _intersects(first: Bounds, second: Bounds) -> bool:
+        return not (
+            first[2] < second[0] or first[0] > second[2]
+            or first[3] < second[1] or first[1] > second[3]
+        )
 
     def clear(self) -> None:
         self.operations.clear()
         self._current = None
         self._remote_sequences.clear()
+        self._spatial_cells.clear()
+        self._spatial_bounds.clear()
+        self._spatial_operations.clear()
+        self._spatial_large.clear()
+        self._render_positions.clear()
