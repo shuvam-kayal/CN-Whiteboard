@@ -41,6 +41,7 @@ class WhiteboardPage(QWidget):
         self.canvas = DrawingCanvas()
         self.canvas.operation_completed.connect(self.drawing_operation_completed.emit)
         self.canvas.cursor_moved.connect(self._queue_cursor_position)
+        self.canvas.view_changed.connect(self._update_zoom_label)
         self._pending_cursor: tuple[float, float] | None = None
         self._cursor_timer = QTimer(self)
         self._cursor_timer.setSingleShot(True)
@@ -187,6 +188,25 @@ class WhiteboardPage(QWidget):
 
         actions = QHBoxLayout()
         actions.setContentsMargins(12, 0, 12, 9)
+        self.zoom_out_button = QPushButton("−")
+        self.zoom_out_button.setObjectName("zoomOutButton")
+        self.zoom_out_button.setToolTip("Zoom out")
+        self.zoom_out_button.clicked.connect(self.canvas.zoom_out)
+        self.zoom_label = QLabel("100%")
+        self.zoom_label.setObjectName("zoomPercentageLabel")
+        self.zoom_label.setMinimumWidth(48)
+        self.zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.zoom_in_button = QPushButton("+")
+        self.zoom_in_button.setObjectName("zoomInButton")
+        self.zoom_in_button.setToolTip("Zoom in")
+        self.zoom_in_button.clicked.connect(self.canvas.zoom_in)
+        self.reset_view_button = QPushButton("Reset view")
+        self.reset_view_button.setObjectName("resetViewButton")
+        self.reset_view_button.clicked.connect(self.canvas.reset_view)
+        actions.addWidget(self.zoom_out_button)
+        actions.addWidget(self.zoom_label)
+        actions.addWidget(self.zoom_in_button)
+        actions.addWidget(self.reset_view_button)
         actions.addStretch()
 
         self.clear_button = QPushButton("Clear canvas")
@@ -275,6 +295,9 @@ class WhiteboardPage(QWidget):
         size = self.size_combo.itemData(index)
         if size:
             self.canvas.set_brush_size(size)
+
+    def _update_zoom_label(self, zoom: float) -> None:
+        self.zoom_label.setText(f"{round(zoom * 100)}%")
 
     def _canvas(self) -> QFrame:
         frame = QFrame()
@@ -386,6 +409,7 @@ class WhiteboardPage(QWidget):
         self.participant_activity.hide()
         self.canvas.remote_cursors.clear()
         self.canvas.clear()
+        self.canvas.reset_view()
         self.chat_history.clear()
         self.chat_status.clear()
         self.persistence_status = ""

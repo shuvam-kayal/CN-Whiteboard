@@ -4,7 +4,7 @@ import math
 import uuid
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QImage, QPainter, QPen
+from PySide6.QtGui import QColor, QFontMetrics, QImage, QPainter, QPen, QTransform
 from PySide6.QtWidgets import QWidget
 
 from client.drawing_engine import DrawingEngine, DrawingOperation
@@ -16,6 +16,10 @@ class DrawingCanvas(QWidget):
 
     operation_completed = Signal(str, dict)
     cursor_moved = Signal(float, float)
+    view_changed = Signal(float)
+    MIN_ZOOM = 0.25
+    MAX_ZOOM = 4.0
+    ZOOM_STEP = 1.2
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -30,6 +34,11 @@ class DrawingCanvas(QWidget):
         self.brush_size = 4.0
         self.brush_type = "pen"
         self.brush_opacity = 1.0
+        self.zoom = 1.0
+        self.pan_x = 0.0
+        self.pan_y = 0.0
+        self._panning = False
+        self._last_pan_position: QPointF | None = None
 
     def set_tool(self, tool: str) -> None:
         if tool not in {"pen", "eraser", "line", "rectangle", "ellipse"}:
@@ -55,6 +64,43 @@ class DrawingCanvas(QWidget):
             raise ValueError("brush type is not supported")
         self.brush_type = brush_type
         self.brush_opacity = settings[brush_type]
+
+    def screen_to_world(self, position: QPointF) -> QPointF:
+        """Convert viewport-local screen coordinates to stable drawing coordinates."""
+        return QPointF(position.x() / self.zoom + self.pan_x,
+                       position.y() / self.zoom + self.pan_y)
+
+    def world_to_screen(self, position: QPointF) -> QPointF:
+        """Convert stable drawing coordinates to viewport-local screen coordinates."""
+        return QPointF((position.x() - self.pan_x) * self.zoom,
+                       (position.y() - self.pan_y) * self.zoom)
+
+    def zoom_at(self, factor: float, screen_position: QPointF | None = None) -> None:
+        """Change local zoom while keeping the world point under screen_position fixed."""
+        if screen_position is None:
+            screen_position = QPointF(self.width() / 2, self.height() / 2)
+        world_anchor = self.screen_to_world(screen_position)
+        new_zoom = min(self.MAX_ZOOM, max(self.MIN_ZOOM, self.zoom * factor))
+        if math.isclose(new_zoom, self.zoom):
+            return
+        self.zoom = new_zoom
+        self.pan_x = world_anchor.x() - screen_position.x() / new_zoom
+        self.pan_y = world_anchor.y() - screen_position.y() / new_zoom
+        self.view_changed.emit(self.zoom)
+        self.update()
+
+    def zoom_in(self) -> None:
+        self.zoom_at(self.ZOOM_STEP)
+
+    def zoom_out(self) -> None:
+        self.zoom_at(1.0 / self.ZOOM_STEP)
+
+    def reset_view(self) -> None:
+        if self.zoom == 1.0 and self.pan_x == 0.0 and self.pan_y == 0.0:
+            return
+        self.zoom, self.pan_x, self.pan_y = 1.0, 0.0, 0.0
+        self.view_changed.emit(self.zoom)
+        self.update()
 
     def clear(self) -> None:
         self.engine.clear()
@@ -134,11 +180,17 @@ class DrawingCanvas(QWidget):
             self.update()
 
     def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self._panning = True
+            self._last_pan_position = event.position()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             self._emit_cursor_position(event)
             operation_type = self.tool
             self.engine.begin_stroke(
-                self._event_point(event),
+                self._event_world_point(event),
                 "#ffffff" if operation_type == "eraser" else self.pen_color,
                 self.brush_size,
                 operation_type,
@@ -151,21 +203,37 @@ class DrawingCanvas(QWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
+        if self._panning and self._last_pan_position is not None:
+            position = event.position()
+            delta = position - self._last_pan_position
+            self.pan_x -= delta.x() / self.zoom
+            self.pan_y -= delta.y() / self.zoom
+            self._last_pan_position = position
+            self._emit_cursor_position(event)
+            self.update()
+            event.accept()
+            return
         self._emit_cursor_position(event)
         if self.engine.current_operation is not None:
             if self.engine.current_operation.operation_type in {"line", "rectangle", "ellipse"}:
-                self.engine.update_shape(self._event_point(event))
+                self.engine.update_shape(self._event_world_point(event))
             else:
-                self.engine.add_point(self._event_point(event))
+                self.engine.add_point(self._event_world_point(event))
             self.update()
             event.accept()
             return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.MiddleButton and self._panning:
+            self._panning = False
+            self._last_pan_position = None
+            self.setCursor(Qt.CursorShape.CrossCursor)
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             self._emit_cursor_position(event)
-            operation = self.engine.finish_stroke(self._event_point(event))
+            operation = self.engine.finish_stroke(self._event_world_point(event))
             if operation is not None:
                 operation.operation_id = uuid.uuid4().hex
                 self.operation_completed.emit(
@@ -180,11 +248,19 @@ class DrawingCanvas(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), QColor("white"))
+        painter.save()
+        painter.setWorldTransform(
+            QTransform(
+                self.zoom, 0, 0, self.zoom,
+                -self.pan_x * self.zoom, -self.pan_y * self.zoom,
+            )
+        )
         for operation in self.engine.operations:
             if operation.active:
                 self._render_operation(painter, operation)
         if self.engine.current_operation is not None:
             self._render_operation(painter, self.engine.current_operation)
+        painter.restore()
         for cursor in self.remote_cursors.values():
             self._render_cursor(painter, cursor)
         painter.end()
@@ -194,8 +270,12 @@ class DrawingCanvas(QWidget):
         position = event.position()
         return position.x(), position.y()
 
+    def _event_world_point(self, event) -> tuple[float, float]:
+        point = self.screen_to_world(event.position())
+        return point.x(), point.y()
+
     def _emit_cursor_position(self, event) -> None:
-        x, y = self._event_point(event)
+        x, y = self._event_world_point(event)
         self.cursor_moved.emit(
             min(1.0, max(0.0, x / max(1, self.width() - 1))),
             min(1.0, max(0.0, y / max(1, self.height() - 1))),
@@ -243,8 +323,12 @@ class DrawingCanvas(QWidget):
         painter.restore()
 
     def _render_cursor(self, painter: QPainter, cursor: dict) -> None:
-        x = cursor["x"] * max(1, self.width() - 1)
-        y = cursor["y"] * max(1, self.height() - 1)
+        world_position = QPointF(
+            cursor["x"] * max(1, self.width() - 1),
+            cursor["y"] * max(1, self.height() - 1),
+        )
+        screen_position = self.world_to_screen(world_position)
+        x, y = screen_position.x(), screen_position.y()
         color = QColor(cursor["color"])
         painter.save()
         painter.setPen(QPen(QColor("white"), 2))
@@ -270,3 +354,12 @@ class DrawingCanvas(QWidget):
         painter.setPen(QColor("white"))
         painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, cursor["username"])
         painter.restore()
+
+    def wheelEvent(self, event) -> None:
+        delta = event.angleDelta().y()
+        if delta:
+            factor = self.ZOOM_STEP if delta > 0 else 1.0 / self.ZOOM_STEP
+            self.zoom_at(factor, event.position())
+            event.accept()
+            return
+        super().wheelEvent(event)
