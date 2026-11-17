@@ -4,10 +4,14 @@ import socket
 import threading
 import time
 import uuid
+import logging
 
 from PySide6.QtCore import QObject, Signal
 
 from shared.protocol import MessageBuffer, ProtocolError, encode_message
+
+
+logger = logging.getLogger(__name__)
 
 
 class NetworkClient(QObject):
@@ -103,6 +107,7 @@ class NetworkClient(QObject):
             try:
                 connection = socket.create_connection((self.address, self.port), timeout=5)
                 connection.settimeout(0.25)
+                logger.info("connected to whiteboard server %s:%s", self.address, self.port)
                 with self._socket_lock:
                     if self._stop.is_set():
                         connection.close()
@@ -155,6 +160,12 @@ class NetworkClient(QObject):
                         self.message_received.emit(message)
             except (OSError, ProtocolError, TimeoutError) as exc:
                 last_reason = str(exc) or "connection lost"
+                logger.warning(
+                    "connection to whiteboard server %s:%s failed: %s",
+                    self.address,
+                    self.port,
+                    last_reason,
+                )
             finally:
                 with self._socket_lock:
                     if self._socket is connection:
@@ -164,6 +175,7 @@ class NetworkClient(QObject):
                         connection.close()
                     except OSError:
                         pass
+                    logger.info("disconnected from whiteboard server %s:%s", self.address, self.port)
 
             if self._stop.is_set():
                 return

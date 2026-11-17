@@ -9,6 +9,7 @@ import re
 import tempfile
 from typing import Any
 
+from shared.app_paths import boards_directory as default_boards_directory
 from shared.drawing import DrawingDataError, validate_drawing_operation
 
 
@@ -52,8 +53,9 @@ class PersistenceManager:
     """Read and atomically write room state under a trusted boards directory."""
 
     def __init__(self, boards_directory: str | Path | None = None) -> None:
-        default_directory = Path(__file__).resolve().parents[1] / "data" / "boards"
-        self.boards_directory = Path(boards_directory or default_directory).resolve()
+        self.boards_directory = Path(
+            boards_directory if boards_directory is not None else default_boards_directory()
+        ).resolve()
 
     def save_board(
         self,
